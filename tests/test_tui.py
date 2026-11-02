@@ -236,3 +236,54 @@ class TestTuiVoice:
             for _ in range(6):
                 await pilot.pause()
             assert app.voice_on is False
+
+
+# -------------------------------------------------- TUI polish (T28)
+
+
+class TestTuiPolish:
+    @pytest.mark.asyncio
+    async def test_mount_shows_a_welcome_note(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False)
+        async with app.run_test() as pilot:
+            for _ in range(4):
+                await pilot.pause()
+            assert "/help" in app.transcript
+            assert "current_time" in app.transcript  # hints mention tools
+
+    @pytest.mark.asyncio
+    async def test_help_command_lists_commands(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False)
+        async with app.run_test() as pilot:
+            await pilot.press("/", "h", "e", "l", "p", "enter")
+            for _ in range(6):
+                await pilot.pause()
+            assert "/model" in app.transcript and "/provider" in \
+                app.transcript
+            assert "/img" in app.transcript and "/voice" in app.transcript
+            # spanish alias registers
+            await pilot.press("/", "a", "y", "u", "d", "a", "enter")
+            for _ in range(6):
+                await pilot.pause()
+        assert app.transcript.count("/model") >= 2
+
+    @pytest.mark.asyncio
+    async def test_items_get_role_classes(self, cfg):
+        from textual.widgets import Static as S
+
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda msgs, model, system=None: iter(["hola!"]))
+        async with app.run_test() as pilot:
+            await pilot.press("a", "enter")
+            for _ in range(12):
+                await pilot.pause()
+            you, reply = app.query("#chat > .you")[0], app.query(
+                "#chat > .reply")[0]
+            assert "you>" in str(you.content)
+            assert "hola!" in str(reply.content)

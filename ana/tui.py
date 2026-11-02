@@ -15,6 +15,25 @@ import sys
 import threading
 import time
 
+ANA_TUI_WELCOME = (
+    "¡Hola! Soy Ana. Escribime, o con /voice on presioná Enter con el "
+    "campo vacío para hablar. Comandos: /help · /model · /provider · "
+    "/img · /voice · /tools · /new. Herramientas disponibles incluyen "
+    "current_time (hora y fecha), system_info y web_search.")
+
+ANA_TUI_HELP = (
+    "Comandos:\n"
+    "/model [name]      model override (auto-picked for images)\n"
+    "/provider [name]   switch provider from the config\n"
+    "/tools [on|off|list]   tool calling\n"
+    "/voice [on|off|status]   voice: empty-Enter = push-to-talk,\n"
+    "                   replies spoken (voxtype STT, Piper TTS)\n"
+    "/img <ruta>        attach an image to the next message\n"
+    "/new               clear this conversation\n"
+    "/exit (Ctrl+Q)     leave\n"
+    "Tools of note: current_time (hora/fecha), system_info, "
+    "web_search, hypr_*.")
+
 ANA_TUI_MISSING_MSG = (
     "textual not installed — run: .venv/bin/pip install -e '.[tui]'")
 
@@ -94,6 +113,10 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         #status { height: 1; background: $boost; color: $text; padding: 0 1; }
         #chat { border: none; }
         #chat > Static { padding: 0 1; }
+        #chat > .you { color: $accent; }
+        #chat > .reply { color: $text; }
+        #chat > .note { color: $text-muted; }
+        #chat > .error { color: $error; }
         Input { border: none; background: $surface; }
         """
 
@@ -140,6 +163,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
             self._note(f"error: {exc}")
         self.busy = False
         self._refresh_status()
+        if not self.history and getattr(self.cfg, "providers", None):
+            self._note(ANA_TUI_WELCOME)
         if self.query_one("#entry"):
             self.query_one("#entry").focus()
 
@@ -185,19 +210,19 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         widget = getattr(self, "_stream_widget", None)
         buf = getattr(self, "_stream_buf", "")
         if widget is None:
-            self._stream_widget = Static(buf)
+            self._stream_widget = Static(buf, classes="reply")
             chat.mount(self._stream_widget)
             widget = self._stream_widget
         else:
             widget.update(buf)
         chat.scroll_end(animate=False)
 
-    def _mount_item(self, text: str):
+    def _mount_item(self, text: str, kind: str = "note"):
         """A non-streaming line (user turn, command echo, error)."""
         if not (self.is_running and _TEXTUAL_INSTALLED):
             return None
         chat = self.query_one("#chat")
-        widget = Static(text)
+        widget = Static(text, classes=kind)
         chat.mount(widget)
         self._stream_widget = None  # replies restart after a plain line
         self._stream_buf = ""
@@ -226,7 +251,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
             if self.voice_on:
                 self._voice_gate_press()
             return
-        self._note(f"you> {text}")
+        self._mount_item(f"you> {text}", "you")
+        self.transcript += ("" if not self.transcript else "\n")             + f"you> {text}"
         if text.startswith("/"):
             self._command(text)
         else:
@@ -288,6 +314,9 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         cmd, arg = parse_command(line)  # ValueError: unknown shape
         if cmd in ("exit", "quit"):
             self.exit()
+            return
+        if cmd in ("help", "ayuda", "?"):
+            self._note(ANA_TUI_HELP)
             return
         if cmd == "new":
             self.history.clear()

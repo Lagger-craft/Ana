@@ -68,7 +68,7 @@ default_model = "mimo-vl-7b"
 base_url = "http://127.0.0.1:11434/v1"
 api_style = "chat"
 api_key_env = ""
-default_model = "qwen2.5-coder:1.5b"
+default_model = "qwen3.5:4b"
 # Model used when you attach images (vision). Leave it empty to always
 # use default_model for everything.
 vision_model = "qwen3-vl:4b"

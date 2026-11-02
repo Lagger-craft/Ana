@@ -120,4 +120,26 @@ class TestToolInstances:
         reg = tools_mod.build_default_tools()
         assert set(reg.names()) == {
             "web_search", "hypr_active_window", "hypr_workspaces",
-            "hypr_monitors", "hypr_version", "hypr_devices", "system_info"}
+            "hypr_monitors", "hypr_version", "hypr_devices", "system_info",
+            "current_time"}
+
+
+# --------------------------------------------- current_time (S8+)
+
+
+class TestCurrentTime:
+    def test_registered_in_the_default_registry(self, tools):
+        assert tools.has_tool("current_time") if hasattr(tools, "has_tool") \
+            else "current_time" in tools.names()
+
+    def test_returns_local_time_and_iso(self, tools, monkeypatch):
+        monkeypatch.setenv("TZ", "America/Argentina/Buenos_Aires")
+        out = tools.call("current_time", {})
+        # both a machine-readable ISO and a human-readable local time
+        assert "T" in out and ":" in out
+        assert str(__import__("datetime").datetime.now().year) in out
+
+    def test_accepts_timezone_override(self, tools, monkeypatch):
+        monkeypatch.setenv("TZ", "UTC")
+        out = tools.call("current_time", {"timezone": "Europe/Madrid"})
+        assert "T" in out

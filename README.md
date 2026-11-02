@@ -123,6 +123,10 @@ Attach a picture and ask about it, fully local (S4):
 If a provider rejects the tools payload (e.g. a small local model), Ana
 retries the turn without tools and keeps tools off for the session;
 system tools are read-only for now (`hyprctl ... -j`, no dispatch).
+Built-ins include `current_time` (the model never guesses the time —
+it calls the tool), `system_info` and `web_search` (Tavily key).
+
+### TUI (Phase 4)
 
 Example, fully local (no cloud involved):
 

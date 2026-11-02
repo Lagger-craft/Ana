@@ -13,6 +13,9 @@ import sys
 
 import httpx
 
+from datetime import datetime, timezone as _timezone
+from zoneinfo import ZoneInfo
+
 from .agent import Tool, ToolRegistry
 
 TAVILY_URL = "https://api.tavily.com/search"
@@ -91,6 +94,20 @@ def _system_info(args: dict) -> dict:
     }
 
 
+def _current_time(args: dict) -> str:
+    """Current wall-clock time: ISO 8601 line + a human-readable line.
+
+    The model cannot know the present time; it must ask this tool rather
+    than guess. Optional `timezone` accepts an IANA zone (Europe/Madrid);
+    the default is the machine's local zone.
+    """
+    name = str(args.get("timezone", "")).strip()
+    now = datetime.now(_timezone.utc).astimezone(
+        ZoneInfo(name) if name else None)
+    return (now.isoformat(timespec="seconds") + "\n"
+            + now.strftime("%A, %d %B %Y, %H:%M"))
+
+
 def build_default_tools() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(Tool(
@@ -110,6 +127,23 @@ def build_default_tools() -> ToolRegistry:
             "required": ["query"],
         },
         fn=_tavily_search,
+    ))
+    reg.register(Tool(
+        name="current_time",
+        description=(
+            "Returns the current date and time on this machine (ISO 8601 "
+            "plus a human-readable line). Call this whenever the user asks "
+            "about the time, date, weekday, or any now-relative schedule; "
+            "never guess the time."),
+        parameters={
+            "type": "object",
+            "properties": {"timezone": {
+                "type": "string",
+                "description": "optional IANA timezone name "
+                               "(e.g. Europe/Madrid); default: local zone"}},
+            "required": [],
+        },
+        fn=_current_time,
     ))
     for display, sub in HYPRCTL_READ_COMMANDS.items():
         reg.register(_hypr_tool(display, sub))
