@@ -10,7 +10,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 | Phase | Scope |
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
-| **1** ✅✨ | tool-calling: Brave web search, Hyprland read-only queries, system info, graceful no-tools fallback |
+| **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
 | 2 | voice loop: faster-whisper STT + Piper TTS |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
 | 4 | waifu avatar overlay (layer-shell), emotion tags |
@@ -48,8 +48,8 @@ Config keys: `default_provider`, `system_prompt`, and one
 (`chat` for OpenAI-compatible endpoints, `anthropic` for the Messages
 API), `api_key_env`, `default_model`.
 
-To let Ana search the web, also export `BRAVE_API_KEY`
-(free tier: https://brave.com/search/api/).
+To let Ana search the web, also export `TAVILY_API_KEY`
+(free tier: https://tavily.com).
 
 ## Usage
 
@@ -58,7 +58,7 @@ To let Ana search the web, also export `BRAVE_API_KEY`
 .venv/bin/ana --provider ollama  # force a provider for this session
 .venv/bin/ana --no-tools         # plain streaming chat, no tool calls
 .venv/bin/ana chat               # same as bare `ana`
-.venv/bin/ana -m "busca que hay de nuevo en hyprland"  # may search with BRAVE_API_KEY
+.venv/bin/ana -m "busca que hay de nuevo en hyprland"  # may search with TAVILY_API_KEY
 .venv/bin/ana -m "info del sistema"                    # picks system_info tool
 .venv/bin/ana init               # (re)create the starter config
 ```

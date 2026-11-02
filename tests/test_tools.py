@@ -1,4 +1,4 @@
-"""Tests for ana.tools — Brave web search, hyprctl read-only, system info."""
+"""Tests for ana.tools — Tavily web search, hyprctl read-only, system info."""
 
 import sys
 
@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture
 def tools(monkeypatch):
     import ana.tools as tools_mod
-    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     return tools_mod.build_default_tools()
 
 
@@ -22,48 +22,51 @@ class TestWebSearch:
         assert ws["function"]["parameters"]["properties"]["count"]["type"] == "integer"
 
     def test_missing_key_degrades_to_error_string(self, tools, monkeypatch):
-        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
         result = tools.call("web_search", {"query": "hyprland"})
-        assert "BRAVE_API_KEY" in result
+        assert "TAVILY_API_KEY" in result
         assert "unavailable" in result
 
-    def test_brave_query_maps_results(self, tools, monkeypatch):
+    def test_tavily_query_maps_results(self, tools, monkeypatch):
         fake = type("Resp", (), {})()
-        fake.json = lambda: {"web": {"results": [
-            {"title": "Hyprland", "url": "https://hypr.land", "description": "compositor"},
-            {"title": "Omarchy", "url": "https://omarchy.org", "description": None},
-        ]}}
+        fake.json = lambda: {"results": [
+            {"title": "Hyprland", "url": "https://hypr.land", "content": "compositor"},
+            {"title": "Omarchy", "url": "https://omarchy.org", "content": None},
+        ]}
         fake.raise_for_status = lambda: None
-        statuses = []
-        monkeypatch.setenv("BRAVE_API_KEY", "brave-key")
+        calls = []
+        monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
 
-        def fake_get(url, params=None, headers=None, timeout=None):
-            statuses.append((url, params, headers))
+        def fake_post(url, *, json=None, headers=None, timeout=None):
+            calls.append((url, json, headers, timeout))
             return fake
 
         import ana.tools as tools_mod
-        monkeypatch.setattr(tools_mod.httpx, "get", fake_get)
+        monkeypatch.setattr(tools_mod.httpx, "post", fake_post)
         result = tools.call("web_search", {"query": "wayland compositor", "count": 2})
         assert "1. Hyprland" in result
         assert "https://hypr.land" in result
         assert "2. Omarchy" in result
         assert "[no description]" in result
-        url, params, headers = statuses[0]
-        assert url == "https://api.search.brave.com/res/v1/web/search"
-        assert params["q"] == "wayland compositor"
-        assert params["count"] == 2
-        assert headers.get("X-Subscription-Token") == "brave-key"
+        url, payload, headers, timeout = calls[0]
+        assert url == "https://api.tavily.com/search"
+        assert payload["query"] == "wayland compositor"
+        assert payload["max_results"] == 2
+        assert payload["search_depth"] == "basic"
+        assert headers.get("Authorization") == "Bearer tavily-key"
+        assert headers.get("Content-Type") == "application/json"
+        assert timeout == 15
 
-    def test_brave_error_degrades_to_message(self, tools, monkeypatch):
+    def test_tavily_error_degrades_to_message(self, tools, monkeypatch):
         class Fail(Exception):
             pass
 
-        def fake_get(*a, **kw):
+        def fake_post(*a, **kw):
             raise Fail("boom")
 
-        monkeypatch.setenv("BRAVE_API_KEY", "k")
+        monkeypatch.setenv("TAVILY_API_KEY", "k")
         import ana.tools as tools_mod
-        monkeypatch.setattr(tools_mod.httpx, "get", fake_get)
+        monkeypatch.setattr(tools_mod.httpx, "post", fake_post)
         result = tools.call("web_search", {"query": "x"})
         assert "unavailable" in result
 

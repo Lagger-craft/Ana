@@ -15,7 +15,7 @@ import httpx
 
 from .agent import Tool, ToolRegistry
 
-BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+TAVILY_URL = "https://api.tavily.com/search"
 
 HYPRCTL_READ_COMMANDS = {
     "hypr_active_window": "activewindow",
@@ -26,23 +26,25 @@ HYPRCTL_READ_COMMANDS = {
 }
 
 
-def _brave_search(args: dict) -> str:
-    """Search via Brave Search API; degrade to an error message."""
-    key = os.environ.get("BRAVE_API_KEY")
+def _tavily_search(args: dict) -> str:
+    """Search via Tavily Search API; degrade to an error message."""
+    key = os.environ.get("TAVILY_API_KEY")
     if not key:
-        return ("web search unavailable: BRAVE_API_KEY is not set. "
-                "Ask the user to export it (https://brave.com/search/api/).")
+        return ("web search unavailable: TAVILY_API_KEY is not set. "
+                "Ask the user to export it (https://tavily.com).")
     query = args.get("query") or ""
     count = max(1, min(int(args.get("count") or 5), 10))
     try:
-        resp = httpx.get(
-            BRAVE_URL,
-            params={"q": query, "count": count},
-            headers={"X-Subscription-Token": key, "Accept": "application/json"},
-            timeout=15.0,
+        resp = httpx.post(
+            TAVILY_URL,
+            json={"query": query, "max_results": count,
+                  "search_depth": "basic"},
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"},
+            timeout=15,
         )
         resp.raise_for_status()
-        results = (resp.json().get("web") or {}).get("results") or []
+        results = resp.json().get("results") or []
     except Exception as exc:  # network/parse errors must not kill the turn
         return f"web search unavailable: {exc.__class__.__name__}: {exc}"
 
@@ -50,7 +52,7 @@ def _brave_search(args: dict) -> str:
         return f"no results for {query !r}"
     lines = []
     for i, r in enumerate(results, 1):
-        desc = r.get("description") or "[no description]"
+        desc = r.get("content") or "[no description]"
         lines.append(f"{i}. {r.get('title', '(no title)')} - {r.get('url', '')}"
                      f" - {desc}")
     return "\n".join(lines)
@@ -94,7 +96,7 @@ def build_default_tools() -> ToolRegistry:
     reg.register(Tool(
         name="web_search",
         description=(
-            "Search the public web via Brave Search and return top results "
+            "Search the public web via Tavily and return top results "
             "(title, url, description). Use for anything you are unsure of, "
             "news, or current events."),
         parameters={
@@ -107,7 +109,7 @@ def build_default_tools() -> ToolRegistry:
             },
             "required": ["query"],
         },
-        fn=_brave_search,
+        fn=_tavily_search,
     ))
     for display, sub in HYPRCTL_READ_COMMANDS.items():
         reg.register(_hypr_tool(display, sub))
