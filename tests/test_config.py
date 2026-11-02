@@ -20,13 +20,28 @@ class TestTemplate:
         write_template(target)
         text = target.read_text()
         assert text == CONFIG_TEMPLATE
-        for name in ("openai", "anthropic", "opencode", "mimo", "ollama"):
+        for name in (
+            "openai",
+            "anthropic",
+            "opencode-go",
+            "opencode-go-claude",
+            "mimo",
+            "ollama",
+        ):
             assert f"[providers.{name}]" in text, f"missing provider {name}"
 
     def test_write_template_creates_parent_dirs(self, tmp_path):
         target = tmp_path / "nested" / "deep" / "config.toml"
         write_template(target)
         assert target.exists()
+
+    def test_opencode_go_points_at_inference_gateway(self, tmp_path):
+        target = tmp_path / "config.toml"
+        write_template(target)
+        text = target.read_text()
+        assert 'base_url = "https://opencode.ai/inference/openai/v1"' in text
+        assert 'base_url = "https://opencode.ai/inference/anthropic/v1"' in text
+        assert 'api_key_env = "OPENCODE_API_KEY"' in text
 
 
 class TestLoad:
@@ -38,14 +53,14 @@ class TestLoad:
         cfg_path = tmp_path / "config.toml"
         write_template(cfg_path)
         cfg = load_config(cfg_path)
-        assert "opencode" in cfg.providers
+        assert "opencode-go" in cfg.providers
         assert cfg.providers["openai"].base_url == "https://api.openai.com/v1"
         assert cfg.default_provider in cfg.providers
 
     def test_load_rejects_default_provider_unknown(self, tmp_path):
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(CONFIG_TEMPLATE.replace(
-            'default_provider = "opencode"', 'default_provider = "nope"'))
+            'default_provider = "opencode-go"', 'default_provider = "nope"'))
         with pytest.raises(ConfigError, match="provider 'nope' is not defined"):
             load_config(cfg_path)
 

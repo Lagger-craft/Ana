@@ -69,7 +69,7 @@ class TestRepl:
 
     def test_model_without_arg_shows_current(self, cfg, capsys):
         run_repl(cfg_path=cfg, lines=["/model"], stream=None)
-        assert "grok-code-fast-1" in capsys.readouterr().out
+        assert "kimi-k3" in capsys.readouterr().out
 
     def test_model_with_arg_switches_model(self, cfg):
         seen = []
@@ -124,7 +124,7 @@ class TestMain:
                                                       monkeypatch, capsys):
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(
-            CONFIG_TEMPLATE.replace('default_provider = "opencode"',
+            CONFIG_TEMPLATE.replace('default_provider = "opencode-go"',
                                     'default_provider = "openai"'))
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         rc = main(["--config", str(cfg_path), "--message", "hi"])

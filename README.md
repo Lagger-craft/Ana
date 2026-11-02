@@ -2,7 +2,7 @@
 
 Ana is a personal AI assistant for Arch Linux (Omarchy + Hyprland). This is
 **Phase 0**: a streaming chat CLI that talks to cloud providers (OpenAI,
-Anthropic, OpenCode Zen, Xiaomi MiMo) or a local Ollama, driven by a TOML
+Anthropic, OpenCode Go, Xiaomi MiMo) or a local Ollama, driven by a TOML
 config with API keys kept out of the file (env vars only).
 
 The full roadmap lives in `odd/tasks/assistant-core.md`:
@@ -27,12 +27,21 @@ python -m venv .venv
 
 ## Setup
 
+For **OpenCode Go** (default provider): create a Personal API key in the
+OpenCode Console (Account › Personal API keys) — key format
+`oc_sk_...` — then:
+
 ```sh
-export OPENCODE_API_KEY="..."   # https://opencode.ai/zen
-export OPENAI_API_KEY="..."     # optional
-.venv/bin/ana init              # writes ~/.config/ana/config.toml
+export OPENCODE_API_KEY="oc_sk_..."   # OpenCode Go Console key
+export OPENAI_API_KEY="..."           # optional
+.venv/bin/ana init                     # writes ~/.config/ana/config.toml
 $EDITOR ~/.config/ana/config.toml
 ```
+
+The OpenCode Go models are served by API family on the same key:
+- `opencode-go` (api_style chat): kimi-k3, glm-5.x, minimax, deepseek, qwen3.8+
+- `opencode-go-claude` (api_style anthropic): claude-* models
+- GPT* models need the Responses API, not supported yet.
 
 Config keys: `default_provider`, `system_prompt`, and one
 `[providers.NAME]` table per provider with `base_url`, `api_style`
@@ -58,10 +67,6 @@ Example, fully local (no cloud involved):
 ollama serve &                   # if not already running
 .venv/bin/ana --provider ollama -m "Say hello in three words"
 ```
-
-Known limitation: OpenCode Zen serves some GPT* models through the
-Responses API (`/v1/responses`), which this client does not speak yet.
-Claude/Grok/Qwen models on Zen work with `api_style = "chat"`.
 
 ## Tests
 

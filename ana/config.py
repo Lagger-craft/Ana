@@ -19,7 +19,7 @@ CONFIG_TEMPLATE = '''\
 # API keys are read from environment variables, never stored here.
 
 # Name of the provider to use when --provider is not given.
-default_provider = "opencode"
+default_provider = "opencode-go"
 
 # Optional persona prompt sent with every request.
 system_prompt = "You are Ana, a friendly virtual assistant. Answer in the user's language."
@@ -37,15 +37,24 @@ api_style = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 default_model = "claude-sonnet-4-5"
 
-# OpenCode Zen (https://opencode.ai/zen). Get an API key there and
-# export it as OPENCODE_API_KEY. Note: some GPT* models on Zen are
-# served through the Responses API and may need api_style = "responses"
-# (not supported yet); Claude/Grok/Qwen models work fine with "chat".
-[providers.opencode]
-base_url = "https://opencode.ai/zen/v1"
+# OpenCode Go (console subscription, $10/mo). Create a Personal API key
+# in the OpenCode Console (Account > Personal API keys) and export it:
+#   export OPENCODE_API_KEY="oc_sk_..."
+# The gateway serves models by API family. Open models (kimi, glm,
+# minimax, deepseek, qwen3.8+) live on this Chat Completions endpoint:
+[providers.opencode-go]
+base_url = "https://opencode.ai/inference/openai/v1"
 api_style = "chat"
 api_key_env = "OPENCODE_API_KEY"
-default_model = "grok-code-fast-1"
+default_model = "kimi-k3"
+
+# Claude models on the same OpenCode Go key use the Messages API path.
+# (GPT* models need the Responses API, not supported yet.)
+[providers.opencode-go-claude]
+base_url = "https://opencode.ai/inference/anthropic/v1"
+api_style = "anthropic"
+api_key_env = "OPENCODE_API_KEY"
+default_model = "claude-sonnet-5-5"
 
 # Xiaomi MiMo - adjust base_url/model to match your Xiaomi API docs.
 [providers.mimo]
