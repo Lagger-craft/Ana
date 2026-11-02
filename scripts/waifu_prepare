@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Prepare waifu PNGtuber frames: white/jpg background -> transparency.
+
+Usage: scripts/waifu_prepare IDLE_SRC TALK_SRC [srcN nameN ...]
+
+Pares: passes every (src, name) pair through rembg isnet-anime
+(anime-aware segmentation), thresholds tiny alpha specks, trims with a
+SHARED bounding box across all frames (so idle/talk stay aligned), and
+writes name.png into ~/.local/share/ana/waifu/. Needs rembg+onnxruntime
+in the venv: pip install -e '.[tui]' && pip install rembg onnxruntime
+(one-time; the model downloads on first run).
+"""
+import sys
+from pathlib import Path
+
+from rembg import new_session, remove
+
+WAIFU_DIR = Path.home() / ".local" / "share" / "ana" / "waifu"
+
+
+def main(argv) -> int:
+    if ("--help" in argv) or (len(argv) < 2) or (len(argv) % 2 != 1):
+        print(__doc__)
+        return 1
+    pairs = list(zip(argv[1::2], argv[2::2]))
+    WAIFU_DIR.mkdir(parents=True, exist_ok=True)
+    session = new_session("isnet-anime")
+
+    pngs: dict[str, Path] = {}
+    for src, name in pairs:
+        srcp = Path(src)
+        if not srcp.exists():
+            print(f"skipping {name}: {src} not found")
+            continue
+        with open(src, "rb") as fh:
+            out = remove(fh.read(), session=session)
+        tmp = WAIFU_DIR / f"{name}.raw.png"
+        tmp.write_bytes(out)
+        pngs[name] = tmp
+        print(f"{name}: cut out ({len(out) // 1024} KiB)")
+
+    if not pngs:
+        return 1
+    # shared alignment: trim by the UNION bounding box of all frames
+    files = [str(arg) for arg in pngs.values()]
+    geom = subprocess_run(["magick", *files, "-evaluate-sequence", "max",
+                           "-format", "%wx%h%O", "info:"]).strip()
+    for name, raw in pngs.items():
+        dst = WAIFU_DIR / f"{name}.png"
+        subprocess_run(["magick", str(raw), "-crop", geom, "+repage",
+                        str(dst)])
+        raw.unlink()
+        print(f"{name}: aligned ({dst})")
+    return 0
+
+
+def subprocess_run(cmd):
+    import subprocess
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"magick failed: {proc.stderr}")
+    return proc.stdout
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -122,7 +122,7 @@ def run_overlay() -> int:
         import gi
         gi.require_version("Gtk", "4.0")
         gi.require_version("Gtk4LayerShell", "1.0")
-        from gi.repository import Gtk4LayerShell, Gtk, GLib  # noqa: F401
+        from gi.repository import Gdk, Gtk4LayerShell, Gtk, GLib
         if not Gtk4LayerShell.is_supported():
             # libgtk4-layer-shell must load BEFORE libwayland-client;
             # the known fix is LD_PRELOAD — set it and re-exec once.
@@ -148,6 +148,15 @@ def run_overlay() -> int:
 
     window = Gtk.Window()
     window.set_decorated(False)
+    # GTK4 windows paint an opaque theme background by default; the waifu
+    # must be a floating figure, not a white card
+    provider = Gtk.CssProvider()
+    provider.load_from_string(
+        "window { background: transparent; } "
+        "window > box { background: transparent; }")
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     # layer-shell init must happen before the window maps
     Gtk4LayerShell.init_for_window(window)
 

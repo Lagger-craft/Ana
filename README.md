@@ -142,6 +142,26 @@ ollama serve &                   # if not already running
 .venv/bin/ana --provider ollama --no-tools -m "Say hello in three words"
 ```
 
+
+### Waifu overlay art
+
+PNGtuber frames live in `~/.local/share/ana/waifu/` (`idle.png`,
+`talk.png`, optional `blink.png`; 600-1000px, transparent). The user
+can hand-crop them, or run the one-shot pipeline (rembg isnet-anime,
+anime-aware segmentation + shared-bbox trim so frames stay aligned):
+
+```sh
+scripts/waifu_prepare ~/Downloads/idle.jpg ~/Downloads/talk.jpg
+```
+
+Requires ImageMagick + `pip install rembg onnxruntime` (model downloads
+on first run; the waifu shows idle when blink.png is absent).
+Knobs: `$ANA_WAIFU_MONITOR` pins the output (default: NOT the avoid
+one; `$ANA_WAIFU_AVOID`, default DP-1 for the gaming screen),
+`$ANA_WAIFU_SIZE` (px edge, default 220), `$ANA_WAIFU_BLINK"
+2:80". Events: JSON lines on the FIFO — `say` sets the subtitle,
+`state` swaps idle/talk/blink, `quit` closes the window.
+
 ## Voice (Phase 2)
 
 Bidirectional voice, **fully local** (S9/S10): voxtype for
