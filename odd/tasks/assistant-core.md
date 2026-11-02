@@ -53,7 +53,7 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T29 | S13 | TUI polish 2: historial de entrada (Arriba/Abajo), flag ⏳ respondiendo en el status, ANA_TIMEZONE para la tool de hora | 621372b |
 | T30 | S14 | waifu overlay: ventana layer-shell GTK4 (idle/talk + subtítulos), JSON por stdin, assets ~/.local/share/ana/waifu | 469565e |
 | T31 | S14 | integración: eventos say/state desde los turnos (voice-on y texto), ana waifu subcommand | 8a92c7a |
-| T32 | S14 | docs de fuentes de arte + smoke visual en Hyprland | (pending commit) |
+| T32 | S14 | docs de fuentes de arte + smoke visual en Hyprland | f75984a |
 
 ## Log
 
