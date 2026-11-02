@@ -75,6 +75,8 @@ class ProviderClient:
         api_key: str | None = None,
         api_version: str = DEFAULT_ANTHROPIC_VERSION,
         timeout: float = 120.0,
+        keep_alive: str | None = None,
+        vision_max_tokens: int | None = None,
     ) -> None:
         if api_style not in ("chat", "anthropic"):
             raise ValueError(f"unknown api_style: {api_style!r}")
@@ -83,6 +85,8 @@ class ProviderClient:
         self.api_key = api_key
         self.api_version = api_version
         self.timeout = timeout
+        self.keep_alive = keep_alive
+        self.vision_max_tokens = vision_max_tokens
 
     @classmethod
     def from_provider(cls, config, provider, **kwargs) -> "ProviderClient":
@@ -90,6 +94,8 @@ class ProviderClient:
             base_url=provider.base_url,
             api_style=provider.api_style,
             api_key=config.resolve_key(provider),
+            keep_alive=getattr(provider, "keep_alive", None),
+            vision_max_tokens=getattr(provider, "vision_max_tokens", None),
             **kwargs,
         )
 
@@ -128,16 +134,31 @@ class ProviderClient:
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _apply_speed_fields(self, payload: dict, has_images: bool) -> None:
+        """keep_alive always; the vision token cap only on image turns.
+
+        Probed on ollama /v1 (RX 7600): keep_alive extends the loaded
+        model window without sudo; max_tokens caps thinking+answer and
+        scales time ~2× at 1024, but low caps can empty the answer —
+        so it stays opt-in per provider and per config.
+        """
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
+        if self.vision_max_tokens and has_images:
+            payload["max_tokens"] = self.vision_max_tokens
+
     def _chat_request(
         self, messages: list[dict[str, str]], model: str, system: str | None,
         tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
+        has_images = any("images" in m for m in messages)
         payload_messages = _payload_messages(messages, anthropic=False)
         if system:
             payload_messages.insert(0, {"role": "system", "content": system})
         payload: dict = {
             "model": model, "messages": payload_messages, "stream": True,
         }
+        self._apply_speed_fields(payload, has_images)
         if tools:
             payload["tools"] = tools
         return self.base_url + "/chat/completions", payload
@@ -146,9 +167,11 @@ class ProviderClient:
         self, messages: list[dict[str, str]], model: str, system: str | None,
         tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
+        has_images = any("images" in m for m in messages)
         payload_messages = _payload_messages(messages, anthropic=True)
         payload: dict = {"model": model, "messages": payload_messages,
                          "stream": True}
+        self._apply_speed_fields(payload, has_images)
         if system:
             payload["system"] = system
         if tools:

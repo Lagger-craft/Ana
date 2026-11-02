@@ -72,6 +72,12 @@ default_model = "qwen2.5-coder:1.5b"
 # Model used when you attach images (vision). Leave it empty to always
 # use default_model for everything.
 vision_model = "qwen3-vl:4b"
+# Keeps this model loaded between requests (default unload is 5m).
+keep_alive = "1h"
+# Output token budget for image turns (max_tokens). Measured on RX 7600:
+# 256 ≈ 8s but can answer EMPTY (thinking eats the budget); 1024 ≈ 9s
+# with complete thinking; unset ≈ 18s. Remove the line to disable.
+vision_max_tokens = 1024
 '''
 
 
@@ -87,6 +93,8 @@ class Provider:
     api_key_env: str | None = None
     default_model: str = ""
     vision_model: str | None = None  # used automatically when images are attached
+    keep_alive: str | None = None    # stay-loaded window for local servers
+    vision_max_tokens: int | None = None  # output budget for image turns
 
     def __post_init__(self) -> None:
         if self.api_style not in VALID_API_STYLES:
@@ -163,13 +171,15 @@ def load_config(path: str | Path) -> Config:
     providers: dict[str, Provider] = {}
     for name, raw in providers_block.items():
         known_prov = {"base_url", "api_style", "api_key_env",
-                      "default_model", "vision_model"}
+                      "default_model", "vision_model", "keep_alive",
+                      "vision_max_tokens"}
         if not isinstance(raw, dict):
             raise ConfigError(f"{path}: provider '{name}' must be a table")
         bad = sorted(set(raw) - known_prov)
         if bad:
             raise ConfigError(
                 f"{path}: unknown keys in [providers.{name}]: {', '.join(bad)}")
+        max_tokens = raw.get("vision_max_tokens")
         providers[name] = Provider(
             name=name,
             base_url=str(raw.get("base_url", "")),
@@ -177,6 +187,8 @@ def load_config(path: str | Path) -> Config:
             api_key_env=raw.get("api_key_env") or None,
             default_model=str(raw.get("default_model", "")),
             vision_model=raw.get("vision_model") or None,
+            keep_alive=raw.get("keep_alive") or None,
+            vision_max_tokens=int(max_tokens) if max_tokens else None,
         )
 
     cfg = Config(

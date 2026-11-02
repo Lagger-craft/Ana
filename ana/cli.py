@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
+import os
+import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -413,11 +416,59 @@ def _default_registry() -> ToolRegistry:
     return build_default_tools()
 
 
+def _probe_image_size(path: Path):
+    """(width, height) from ffprobe; None when ffprobe can't tell."""
+    try:
+        proc = _probe_run(["ffprobe", "-v", "error", "-show_streams",
+                           "-of", "json", str(path)])
+    except OSError:
+        return None
+    try:
+        stream = json.loads(proc.stdout)["streams"][0]
+        return int(stream["width"]), int(stream["height"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None
+
+
+def _shrink_image(path: Path, max_px: int) -> bytes | None:
+    """Resized bytes (same format) when ffmpeg can build them."""
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=path.suffix or ".png",
+                                         delete=False) as out:
+            out_path = out.name
+        proc = _probe_run([
+            "ffmpeg", "-y", "-v", "error", "-i", str(path),
+            "-vf", (f"scale='min({max_px},iw)':'min({max_px},ih)':"
+                    "force_original_aspect_ratio=decrease"),
+            out_path,
+        ])
+        if Path(out_path).exists():
+            data = Path(out_path).read_bytes()
+            Path(out_path).unlink(missing_ok=True)
+            if proc.returncode == 0 and data:
+                return data
+        Path(out_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
+
+
+def _probe_run(cmd, **kw):
+    """Subprocess seam for ffprobe/ffmpeg (tests monkeypatch this)."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    return proc
+
+
 def _encode_image(file_path: str | Path) -> dict:
     """File path -> {media_type, data(base64)} for a message image.
 
-    Raises ValueError with an actionable message when the path is not an
-    image (magic check is suffix-based) or does not exist.
+    Images larger than $ANA_IMAGE_MAX_PX (default 1024) on either side
+    are rescheduled with ffmpeg first: the vision encoder's grid scales
+    with pixels, so a 4K screenshot burns quadruple the prompt tokens
+    of the same shot at 1024. Lower res passes through untouched.
+    Raises ValueError with an actionable message when the path is not
+    an image or does not exist.
     """
     path = Path(file_path)
     if not path.exists():
@@ -428,8 +479,23 @@ def _encode_image(file_path: str | Path) -> dict:
         raise ValueError(
             f"{path.name} ({suffix}) no es una imagen soportada "
             "(png, jpg, webp, gif...)")
-    return {"media_type": mime, "data": base64.b64encode(
-        path.read_bytes()).decode("ascii")}
+    data = path.read_bytes()
+    limit = _image_max_px()
+    if limit > 0:
+        size = _probe_image_size(path)
+        if size and (size[0] > limit or size[1] > limit):
+            data = _shrink_image(path, limit) or data
+    return {"media_type": mime, "data": base64.b64encode(data).decode(
+        "ascii")}
+
+
+def _image_max_px() -> int:
+    """Resize threshold: $ANA_IMAGE_MAX_PX or 1024; 0 disables."""
+    raw = os.environ.get("ANA_IMAGE_MAX_PX", "").strip()
+    try:
+        return int(raw) if raw else 1024
+    except ValueError:
+        return 1024
 
 
 def _user_message(text: str, image_paths) -> dict:

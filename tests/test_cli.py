@@ -1,5 +1,9 @@
 """Tests for ana.cli — REPL commands, one-shot mode, init and error paths."""
 
+import json
+import types
+from pathlib import Path
+import types
 import pytest
 
 from ana.cli import main, parse_command, run_repl
@@ -272,3 +276,86 @@ class TestVisionModel:
         run_repl(cfg_path=cfg, lines=[f"/img {img}", "mira", "/exit"],
                  provider_override="ollama", client_fx=fx, tools=True)
         assert fx.calls[0]["model"] == "qwen3-vl:4b"  # attached → vision
+
+
+class TestImageDownscale:
+    """OCR tokens come from the vision encoder's grid: big images are the
+    slow path. _encode_image shrinks oversized shots to ANA_IMAGE_MAX_PX
+    (default 1024) via ffmpeg before base64; smaller ones pass through."""
+
+    def test_oversized_image_values_is_resized(self, monkeypatch, tmp_path):
+        import ana.cli as cli
+
+        big = tmp_path / "big.png"
+        big.write_bytes(b"\x89PNG" + b"x" * 40)
+
+        probes = {
+            "ffprobe": types.SimpleNamespace(
+                returncode=0, stdout=json.dumps(
+                    {"streams": [{"width": 4096, "height": 3072}]},
+                ), stderr=""),
+            "ffmpeg": None,  # handled by the cmd seam callback below
+        }
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "ffprobe":
+                return probes["ffprobe"]
+            Path(cmd[-1]).write_bytes(b"\x89PNGsmall")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        result = cli._encode_image(big)
+        ffmpeg_cmd = [c for c in calls if c[0] == "ffmpeg"][0]
+        joined = " ".join(ffmpeg_cmd)
+        assert "scale" in joined and "1024" in joined
+        # result carries the SHRUNK bytes, mime stays png
+        import base64 as b64mod
+        assert result["media_type"] == "image/png"
+        assert b64mod.b64decode(result["data"]) == b"\x89PNGsmall"
+
+    def test_small_image_keeps_original_bytes(self, monkeypatch, tmp_path):
+        import ana.cli as cli
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        small = _png(tmp_path)
+        result = cli._encode_image(small)
+        assert [c[0] for c in calls] == ["ffprobe"]  # no resize executed
+        import base64 as b64mod
+        assert b64mod.b64decode(result["data"]) == small.read_bytes()
+
+    def test_ana_image_max_px_env_overrides(self, monkeypatch, tmp_path):
+        import ana.cli as cli
+
+        monkeypatch.setenv("ANA_IMAGE_MAX_PX", "640")
+
+        def fake_run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+                {"streams": [{"width": 2048, "height": 2049}]}), stderr="")
+
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd)
+            if cmd[0] == "ffprobe":
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+                    {"streams": [{"width": 2048, "height": 2049}]}), stderr="")
+            Path(cmd[-1]).write_bytes(b"\xff\xd8small")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        big = tmp_path / "big.jpg"
+        big.write_bytes(b"\xff\xd8\xffII*")
+        cli._encode_image(big)
+        cmd = [c for c in seen if c[0] == "ffmpeg"][0]
+        joined = " ".join(cmd)
+        assert "scale" in joined and "640" in joined
+

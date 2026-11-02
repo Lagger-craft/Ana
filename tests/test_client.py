@@ -324,3 +324,33 @@ class TestReasoningDeltas:
             assert kinds[1] == "text"
         finally:
             server.stop()
+
+
+# --------------------------------------------- speed levers (T23)
+
+
+class TestPayloadSpeedFields:
+    def test_keep_alive_added_when_provider_sets_it(self, chat_server):
+        client = make_chat_client(chat_server)
+        client.keep_alive = "1h"
+        list(client.stream_chat([{"role": "user", "content": "hi"}], "m1"))
+        assert json.loads(chat_server.last_body)["keep_alive"] == "1h"
+
+    def test_vision_max_tokens_only_applies_to_image_turns(self,
+                                                           chat_server):
+        client = make_chat_client(chat_server)
+        client.vision_max_tokens = 1024
+
+        # no images: no cap
+        list(client.stream_chat([{"role": "user", "content": "hi"}], "m1"))
+        assert json.loads(chat_server.last_body) == {
+            "model": "m1", "stream": True,
+            "messages": [{"role": "user", "content": "hi"}]}
+
+        # images: capped (probed: 256 empties answers, 1024 keeps stops)
+        list(client.stream_chat(
+            [{"role": "user", "content": "mira", "images": [_img()]}], "m1"))
+        body = json.loads(chat_server.last_body)
+        assert body["max_tokens"] == 1024
+        # keep_alive not set by default on this client
+        assert "keep_alive" not in body

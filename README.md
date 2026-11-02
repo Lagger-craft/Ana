@@ -85,6 +85,21 @@ Attach a picture and ask about it, fully local (S4):
   `qwen3-vl:4b`); an explicit `--model` / `/model` still wins.
 - Reasoning models (qwen3*) surface a `(🤔 razonando...)` note while the
   model thinks, so the prompt never looks frozen.
+- **Speed levers** (all config, no sudo): `vision_max_tokens` caps the
+  output budget of image turns (measured on RX 7600: 256 ≈ 8 s but can
+  answer EMPTY; 1024 ≈ 9 s with complete thinking; unset ≈ 18 s; the
+  template ships 1024). Oversized shots are downscaled to
+  `ANA_IMAGE_MAX_PX` (default 1024; 0 disables) before sending — the
+  vision encoder's grid scales with pixels. `keep_alive = "1h"` keeps
+  the model loaded between requests (default 5 min). And make sure
+  ollama actually runs on your GPU: Arch's plain `ollama` package ships
+  no GPU backends — install `ollama-vulkan` (`ollama ps` should say
+  100% GPU after a vision turn; on CPU this blurred image took 2m17,
+  same ask 17.8 s on the RX 7600).
+
+```sh
+.venv/bin/ana -m "describe la imagen" --image captura.png
+```
 
 If a provider rejects the tools payload (e.g. a small local model), Ana
 retries the turn without tools and keeps tools off for the session;

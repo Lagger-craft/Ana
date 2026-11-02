@@ -103,3 +103,49 @@ class TestApiKey:
                 api_key_env=None, default_model="m1")},
         )
         assert cfg.resolve_key(cfg.providers["p"]) is None
+
+
+def _write_config(tmp_path, text):
+    p = tmp_path / "config.toml"
+    p.write_text(text)
+    import re
+    return p
+
+
+class TestVisionSpeedConfig:
+    def test_provider_parses_keep_alive_and_vision_max_tokens(self, tmp_path):
+        from ana.config import load_config
+
+        cfg = load_config(_write_config(tmp_path, """
+default_provider = "x"
+[providers.x]
+base_url = "http://x/v1"
+default_model = "m1"
+keep_alive = "1h"
+vision_max_tokens = 1024
+"""))
+        p = cfg.provider("x")
+        assert p.keep_alive == "1h"
+        assert p.vision_max_tokens == 1024
+
+    def test_missing_speed_fields_are_none(self, tmp_path):
+        from ana.config import load_config
+
+        cfg = load_config(_write_config(tmp_path, """
+default_provider = "x"
+[providers.x]
+base_url = "http://x/v1"
+default_model = "m1"
+"""))
+        p = cfg.provider("x")
+        assert p.keep_alive is None
+        assert p.vision_max_tokens is None
+
+    def test_template_ships_speed_defaults_for_ollama(self):
+        import tomllib
+        from ana.config import CONFIG_TEMPLATE
+
+        data = tomllib.loads(CONFIG_TEMPLATE)
+        ollama = data["providers"]["ollama"]
+        assert ollama.get("keep_alive") == "1h"
+        assert ollama.get("vision_max_tokens") == 1024
