@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Ana quick launcher: bring up the waifu overlay (only if it is not
+# already running) and open the chat TUI in the default terminal.
+# Bound to SUPER+A in ~/.config/hypr/bindings.lua (S15/T33).
+#
+# Single overlay instance matters: two FIFO readers would split every
+# say/state event between them and the subtitle would flicker randomly.
+set -u
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ANA="$REPO/.venv/bin/ana"
+
+# Match the live overlay only: the re-exec'd system-python process
+# ("python3 -m ana.overlay waifu") and the pre-re-exec venv one
+# (".../.venv/bin/ana waifu"). Anchored so wrapper shells that merely
+# CONTAIN those words (bash -c '... ana waifu ...') never count.
+if ! pgrep -f '^python3 -m ana\.overlay|bin/ana waifu$' >/dev/null 2>&1; then
+    # detached: survives the exec below; log for post-mortems
+    (nohup "$ANA" waifu >/tmp/ana-waifu.log 2>&1 </dev/null &)
+fi
+
+# replace this process with the terminal running the TUI
+exec xdg-terminal-exec "$ANA" tui
