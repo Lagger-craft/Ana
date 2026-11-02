@@ -45,8 +45,8 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T21 | S4 | CLI: --image one-shot + REPL /img, vision_model config default | 46128cf |
 | T22 | S4 | docs + live smoke vs ollama qwen3-vl | 46128cf |
 | T23 | S4 | speed levers: vision_max_tokens + image downscale + keep_alive | 1ddb2f1 |
-| T24 | S13 | Textual TUI app: chat panel + input + streaming, command parity (/model /provider /new /img), ana tui subcommand | (L25 pending commit) |
-| T25 | S13 | TUI docs + pyproject extras + smoke | (L25 pending commit) |
+| T24 | S13 | Textual TUI app: chat panel + input + streaming, command parity (/model /provider /new /img), ana tui subcommand | 0c9733f |
+| T25 | S13 | TUI docs + pyproject extras + smoke | 0c9733f (docs included) |
 
 ## Log
 
