@@ -110,3 +110,129 @@ class TestTuiApp:
 
         p = Provider(name="x", base_url="http://x/v1", default_model="m1")
         assert _model_for_turn(p, None, has_images=False) == "m1"
+
+
+# ------------------------------------------------- voz en la TUI (T26)
+
+
+class _VoiceFx:
+    """Injectable voice seam like the CLI's (record/transcribe/speak)."""
+
+    def __init__(self, transcript="hola por voz", speak_error=None):
+        self.transcript = transcript
+        self.speak_error = speak_error
+        self.recorded = []   # (max_seconds, press_kind)
+        self.spoken = []
+        self.record_error = None
+
+    def record(self, max_seconds, press):
+        if self.record_error is not None:
+            raise self.record_error
+        press()                      # first press: start
+        ok = press(timeout=max_seconds)  # second press or auto-stop
+        self.recorded.append((max_seconds, "ok" if ok else "timeout"))
+        return "/fake/take.wav"
+
+    def transcribe(self, wav):
+        return self.transcript
+
+    def speak(self, text):
+        if self.speak_error is not None:
+            raise self.speak_error
+        self.spoken.append(text)
+
+
+def _press(app, keys, pauses=8):
+    async def go(pilot):
+        await pilot.press(*keys)
+        for _ in range(pauses):
+            await pilot.pause()
+    return go
+
+
+class TestTuiVoice:
+    @pytest.mark.asyncio
+    async def test_no_voice_by_default(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda *a, **k: iter(["ok"]))
+        vfx = _VoiceFx()
+        app.voice_fx = vfx
+        async with app.run_test() as pilot:
+            await pilot.press("enter")   # empty input with voice OFF: nothing
+            for _ in range(6):
+                await pilot.pause()
+            assert vfx.recorded == []
+            assert app.history == []
+
+    @pytest.mark.asyncio
+    async def test_voice_round_on_empty_enter_twice(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda msgs, model, system=None: iter(["ok"]))
+        vfx = _VoiceFx(transcript="hola por voz")
+        app.voice_fx = vfx
+        app.voice_on = True
+        async with app.run_test() as pilot:
+            await pilot.press("enter")        # first press: START
+            for _ in range(3):
+                await pilot.pause()
+            await pilot.press("enter")        # second press: STOP
+            for _ in range(12):
+                await pilot.pause()
+        assert vfx.recorded, "record should have run"
+        assert app.history[-2]["content"] == "hola por voz"
+        assert app.history[-1]["role"] == "assistant"
+        assert "hola por voz" in app.transcript
+
+    @pytest.mark.asyncio
+    async def test_reply_is_spoken_when_voice_on(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda msgs, model, system=None: iter(["digital!"]))
+        vfx = _VoiceFx()
+        app.voice_fx = vfx
+        app.voice_on = True
+        async with app.run_test() as pilot:
+            await pilot.press("a", "enter")   # typed input; reply spoken too
+            for _ in range(12):
+                await pilot.pause()
+        assert app.history[-1]["content"] == "digital!"
+        assert vfx.spoken == ["digital!"]
+
+    @pytest.mark.asyncio
+    async def test_speak_error_degrades_without_crashing(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda msgs, model, system=None: iter(["ok"]))
+        vfx = _VoiceFx(speak_error=RuntimeError("no piper"))
+        app.voice_fx = vfx
+        app.voice_on = True
+        async with app.run_test() as pilot:
+            await pilot.press("a", "enter")
+            for _ in range(12):
+                await pilot.pause()
+        assert vfx.recorded == []
+        assert app.history[-1]["content"] == "ok"   # turn kept
+        assert "voice unavailable" in app.transcript
+
+    @pytest.mark.asyncio
+    async def test_voice_command_toggles(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False)
+        async with app.run_test() as pilot:
+            await pilot.press("/", "v", "o", "i", "c", "e", "space",
+                              "o", "n", "enter")
+            for _ in range(6):
+                await pilot.pause()
+            assert app.voice_on is True
+            await pilot.press("/", "v", "o", "i", "c", "e", "space",
+                              "o", "f", "f", "enter")
+            for _ in range(6):
+                await pilot.pause()
+            assert app.voice_on is False

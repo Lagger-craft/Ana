@@ -45,6 +45,31 @@ except ImportError:  # tui extra optional — plain chat still works
     _TEXTUAL_INSTALLED = False
 
 
+class _PressGate:
+    """Push-to-talk click seam: callable, driven by Ui input events.
+
+    record_to_wav asks press() (no timeout, start) and then
+    press(timeout=limit) (stop): each blocks until the UI side puts a
+    token, or returns False at the timeout (auto-stop). A raw Queue is
+    not callable and record_to_wav calls press() directly.
+    """
+
+    def __init__(self) -> None:
+        import queue as _queue
+
+        self._q: "_queue.Queue[str]" = _queue.Queue()
+
+    def put(self, kind: str) -> None:
+        self._q.put(kind)
+
+    def __call__(self, timeout=None) -> bool:
+        try:
+            self._q.get(timeout=timeout)
+            return True
+        except Exception:  # queue.Empty (or closed app): auto-stop
+            return False
+
+
 def import_textual():
     """Fail closed when the tui extra is not installed."""
     if not _TEXTUAL_INSTALLED:
@@ -75,7 +100,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
     def __init__(self, cfg_path, model_override=None,
                  provider_override=None, tools=True, registry=None,
                  client_fx=None, stream=None, images=None,
-                 max_rounds: int = 4):
+                 max_rounds: int = 4, voice: bool = False,
+                 stt: str | None = None):
         super().__init__()
         self.cfg_path = cfg_path
         self.model_override = model_override
@@ -88,6 +114,10 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         self.history: list[dict] = []
         self.pending_images: list[str] = list(images or [])
         self.transcript = ""
+        self.voice_on = voice
+        self.stt = stt
+        self.voice_fx = None   # injected seam (tests) or the live default
+        self._press_gate = None      # push-to-talk gate (None = not recording)
         self.busy = True  # until the first mount finishes loading
 
     # ---- widgets ------------------------------------------------------
@@ -129,7 +159,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         self._set_status(
             f"model: {model} · provider: {provider} · "
             f"tools: {'on' if self.tools_on else 'off'} · "
-            f"imgs: {len(self.pending_images)}")
+            f"imgs: {len(self.pending_images)} · "
+            f"voice: {'on' if self.voice_on else 'off'}")
 
     # ---- transcript ---------------------------------------------------
 
@@ -190,12 +221,66 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         text = (value or "").strip()
         self.query_one("#entry").value = ""
         if not text:
+            # S9 gesture parity: with voice on, an empty submit toggles the
+            # push-to-talk (first press starts, second stops).
+            if self.voice_on:
+                self._voice_gate_press()
             return
         self._note(f"you> {text}")
         if text.startswith("/"):
             self._command(text)
         else:
             self._run_turn(text)
+
+    # ---- voice (S9): same voice seam as the CLI REPL -------------------
+
+    def _voice_gate_press(self) -> None:
+        if self._press_gate is not None:
+            self._press_gate.put("stop")   # second press: stop recording
+            return
+        self._press_gate = _PressGate()
+        self._press_gate.put("start")      # first press: start instantly
+        self.busy = True
+        self.run_worker(self._voice_record_worker, exclusive=True,
+                        thread=True, name="ana-voice")
+
+    def _voice_record_worker(self) -> None:
+        """Thread worker: push-to-talk round, then the shared turn engine."""
+        from .voice.errors import VoiceError
+
+        from .cli import _DefaultVoice
+        from .voice.stt import default_max_seconds
+
+        gate = self._press_gate
+        vfx = self.voice_fx if self.voice_fx is not None else _DefaultVoice(
+            self.stt)
+        try:
+            wav = vfx.record(default_max_seconds(), press=gate)
+            heard = (vfx.transcribe(wav) or "").strip()
+        except VoiceError as exc:
+            self.emit_threaded(f"(voice unavailable: {exc})")
+        except Exception as exc:  # transcription/storage hazards
+            self.emit_threaded(f"(voice unavailable: {exc})")
+        else:
+            if not heard:
+                self.emit_threaded("(no escuché nada)")
+            else:
+                self.emit_threaded(f"you> {heard} (voz)")
+                self._turn_worker(heard)
+        finally:
+            self._press_gate = None
+            self.call_from_thread(self._finish_turn, "")
+
+    def voice_fx_speak(self, reply: str) -> None:
+        """Speak a reply; degrade to a note, never crash the turn."""
+        try:
+            from .cli import _DefaultVoice
+
+            vfx = self.voice_fx if self.voice_fx is not None else _DefaultVoice(
+                self.stt)
+            vfx.speak(reply)
+        except Exception as exc:
+            self.emit_threaded(f"(voice unavailable: {exc})")
 
     def _command(self, line: str) -> None:
         from .cli import parse_command
@@ -227,6 +312,19 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                 self._refresh_status()
             else:
                 self._note(f"provider: {self.provider_override or self.cfg.default_provider}")
+        elif cmd == "voice":
+            if arg == "on":
+                self.voice_on = True
+                self._note("voice on")
+            elif arg == "off":
+                self.voice_on = False
+                self._note("voice off")
+            elif arg == "status":
+                self._note(f"voice: {'on' if self.voice_on else 'off'}")
+            else:
+                self._note(f"voice: {'on' if self.voice_on else 'off'} "
+                           "(usage: /voice [on|off|status])")
+            self._refresh_status()
         elif cmd in ("img", "image", "imagen"):
             if not arg:
                 if self.pending_images:
@@ -269,12 +367,16 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                 # the plain stream closure mirror: current_stream() -> fn
                 current_stream = lambda: self.stream  # noqa: E731
             try:
-                _do_turn(
+                state = _do_turn(
                     self.cfg, self.provider_override, None,
                     self.model_override, self.history, line,
                     self.emit_threaded, current_stream, self.tools_on,
                     self.registry, self.client_fx, self.max_rounds,
                     images=images)
+                if (self.voice_on and state in ("ok", "tools-unavailable")
+                        and self.history
+                        and self.history[-1]["role"] == "assistant"):
+                    self.voice_fx_speak(self.history[-1]["content"])
             except Exception as exc:  # _do_turn notes expected errors
                 _dbg("turn raised: %s: %s", type(exc).__name__, exc)
                 self.emit_threaded(f"error: {exc}")
