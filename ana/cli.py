@@ -21,6 +21,7 @@ from .client import ProviderClient, ProviderError
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
 from .tools import build_default_tools
 from .voice import VoiceError
+from .voice.stt import default_max_seconds, stdin_press
 
 StreamFn = Callable[..., Iterator[str]]
 
@@ -62,7 +63,7 @@ def run_repl(
     client_fx: object | None = None,
     max_rounds: int = 4,
     voice: bool = False,
-    voice_secs: float = 5.0,
+    voice_secs: float | None = None,
     voice_fx: object | None = None,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
@@ -71,13 +72,16 @@ def run_repl(
     canned backend. Returns the conversation history (user + assistant
     messages) accumulated during the session.
 
-    ``voice`` starts the session in voice mode (S9): press Enter on the
-    empty prompt to record ``voice_secs`` seconds, transcribe locally,
-    and run the transcript through the normal turn — the final reply is
-    then spoken. ``voice_fx`` is the injectable seam with ``record`` /
-    ``transcribe`` / ``speak`` methods (tests use fakes; the default is
-    the live :class:`_DefaultVoice` backend). Voice errors degrade to
-    ``(voice unavailable: ...)`` without leaving the REPL.
+    ``voice`` starts the session in voice mode (S9): push-to-talk — the
+    round prints ``(🎙 Enter para empezar, Enter para terminar (max Ns))``,
+    the first Enter starts recording and the second Enter stops it (or
+    ``voice_secs`` / ``ANA_VOICE_MAX_SECONDS`` / 12 s, whichever comes
+    first); the transcript is transcribed locally and runs through the
+    normal turn, and the final reply is spoken. ``voice_fx`` is the
+    injectable seam with ``record`` / ``transcribe`` / ``speak`` methods
+    (tests use fakes; the default is the live :class:`_DefaultVoice`
+    backend). Voice errors degrade to ``(voice unavailable: ...)``
+    without leaving the REPL.
     """
     cfg = load_config(cfg_path)
     emit = emit or (lambda text: print(text, flush=True))
@@ -93,6 +97,23 @@ def run_repl(
     active_registry: ToolRegistry | None = registry
     voice_on = voice
     vfx = voice_fx if voice_fx is not None else _DefaultVoice()
+
+    def press(timeout: float | None = None) -> bool:
+        """Push-to-talk click seam: block until Enter (or up to timeout).
+
+        Scripted ``lines`` presses arrive instantly; exhausting them
+        counts as "no press" when a timeout applies (auto-stop).
+        """
+        if scripted is not None:
+            try:
+                next(scripted)
+                return True
+            except StopIteration:
+                if timeout is not None:
+                    return False
+                raise VoiceError(
+                    "input exhausted before recording started") from None
+        return stdin_press(timeout)
 
     def current_stream() -> StreamFn:
         nonlocal stream_fn
@@ -117,9 +138,13 @@ def run_repl(
         if not line:
             if not voice_on:
                 continue
-            # voice round (S9): press Enter to talk
+            # push-to-talk voice round (S9): Enter starts, Enter stops
             try:
-                wav = vfx.record(voice_secs)
+                max_secs = (voice_secs if voice_secs is not None
+                            else default_max_seconds())
+                emit("(🎙 Enter para empezar, Enter para terminar "
+                     f"(max {max_secs:g}s))")
+                wav = vfx.record(max_secs, press)
                 heard = (vfx.transcribe(wav) or "").strip()
             except VoiceError as exc:
                 emit(f"(voice unavailable: {exc})")
@@ -128,7 +153,7 @@ def run_repl(
                 emit("\n(record stopped)")
                 continue
             if not heard:
-                emit("(heard nothing, try again)")
+                emit("(no escuché nada)")
                 continue
             emit(f"you> {heard}")
             line = heard
@@ -217,14 +242,14 @@ def run_repl(
 
 
 class _DefaultVoice:
-    """Live voice backend: arecord → faster-whisper → Piper.
+    """Live voice backend: push-to-talk arecord → faster-whisper → Piper.
 
     Imports the voice modules lazily so plain text sessions never touch
     them. The recorded WAV is deleted as soon as transcription finishes
     (or if recording fails), so mic audio does not linger on disk.
     """
 
-    def record(self, seconds: float):
+    def record(self, max_seconds: float, press):
         import os
         import tempfile
         from pathlib import Path
@@ -236,7 +261,7 @@ class _DefaultVoice:
         os.unlink(name)  # arecord creates the file; avoid a stale empty one
         path = Path(name)
         try:
-            return record_to_wav(seconds, path)
+            return record_to_wav(path, max_seconds=max_seconds, press=press)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -369,8 +394,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-tools", action="store_true",
                         help="disable tool calling for this session")
     parser.add_argument("--voice", action="store_true",
-                        help="voice mode: press Enter to talk "
-                             "(local STT; replies are spoken via Piper)")
+                        help="voice mode: push-to-talk (Enter starts/"
+                             "stops recording; local STT, replies are "
+                             "spoken via Piper)")
 
     args = parser.parse_args(argv)
 

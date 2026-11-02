@@ -136,12 +136,17 @@ export ANA_PIPER_MODEL=/path/to/es_XXXX-voice.onnx
 
 In the REPL, `/voice on|off|status` toggles voice for the session:
 
-- **Voice round**: with voice on, press Enter on the empty prompt to
-  record 5 s of audio, transcribe it locally, and run that text through
-  the normal tool-enabled turn. Ana then speaks the final reply with
-  Piper.
+- **Voice round** (push-to-talk): with voice on, press Enter on the
+  empty prompt to see the hint `(🎙 Enter para empezar, Enter para
+  terminar (max 12s))`. The first Enter starts recording, the second
+  stops it; recording also auto-stops at the max time. The audio is
+  transcribed locally and run through the normal tool-enabled turn,
+  then Ana speaks the final reply with Piper. Silence gets
+  `(no escuché nada)` and returns to the prompt.
+- The max recording time comes from `ANA_VOICE_MAX_SECONDS` (seconds,
+  default `12`).
 - **Typed input** still works while voice is on — the reply is spoken
-  too. `/voice off` stops the playback and the Enter-to-talk rounds.
+  too. `/voice off` stops the playback and the push-to-talk rounds.
 - If a dependency or device is missing (no `faster-whisper`, no `piper`,
   no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
   running in text mode — the REPL never crashes on voice errors.
