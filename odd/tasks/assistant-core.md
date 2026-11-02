@@ -40,9 +40,9 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T17 | S12 | user config default provider → ollama qwen3:8b (template untouched) | (no repo change) |
 | T18 | S11,S12 | MPRIS media pause/resume around push-to-talk (voxtype parity) | ee75312 |
 | T19 | S11 | pw-record explicit capture + mic label hint + near-silent warning | 1dd75f8 |
-| T20 | S4 | client: multimodal image content (chat+anthropic), reasoning events | (pending commit) |
-| T21 | S4 | CLI: --image one-shot + REPL /img, vision_model config default | (pending commit) |
-| T22 | S4 | docs + live smoke vs ollama qwen3-vl | (pending commit) |
+| T20 | S4 | client: multimodal image content (chat+anthropic), reasoning events | 46128cf |
+| T21 | S4 | CLI: --image one-shot + REPL /img, vision_model config default | 46128cf |
+| T22 | S4 | docs + live smoke vs ollama qwen3-vl | 46128cf |
 
 ## Log
 
