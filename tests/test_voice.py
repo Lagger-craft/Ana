@@ -327,6 +327,25 @@ class TestPiperTTS:
         assert not Path(wav).exists()  # tmp wav gone after playback
         assert calls[1][0] == ["/usr/bin/paplay", wav]
 
+    def test_speak_feeds_text_to_piper_stdin(self, monkeypatch):
+        """piper reads its text from stdin: speak() must pass it as input.
+
+        Without it, piper phonemizes nothing, writes zero samples, and
+        fails at wav close ('# channels not specified') — caught by the
+        first live smoke with real deps.
+        """
+        import ana.voice.tts as tts
+
+        calls = []
+        monkeypatch.setattr(
+            tts, "_run", lambda cmd, **kw: calls.append((cmd, kw)) or None)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+        PiperTTS(voice="/models/es_AR-daniela-high.onnx").speak("¡Hola Ana!")
+
+        kw = calls[0][1]
+        assert kw["input"] == "¡Hola Ana!\n".encode("utf-8")
+
     def test_missing_piper_raises_actionable_voice_error(self, monkeypatch,
                                                          tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: None)

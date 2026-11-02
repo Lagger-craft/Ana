@@ -98,8 +98,11 @@ class PiperTTS:
         with tempfile.TemporaryDirectory(prefix="ana-tts-") as tmp:
             wav = Path(tmp) / "reply.wav"
             try:
+                # piper reads its text lines from stdin (no --input_file);
+                # UTF-8 bytes so accented text survives the subprocess.
                 _run([piper, "--model", voice,
-                      "--output_file", str(wav)], check=True)
+                      "--output_file", str(wav)],
+                     check=True, input=(text + "\n").encode("utf-8"))
             except subprocess.CalledProcessError as exc:
                 raise VoiceError(
                     f"piper synthesis failed (exit {exc.returncode})"
