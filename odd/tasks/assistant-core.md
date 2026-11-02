@@ -9,7 +9,9 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 - **S3**: "Sobre el 'provedor' Opencode, me refiero a opencode go, con la api key." — OpenCode Go (Console subscription) provider support: API key created in the Console (Account › Personal API keys, `oc_sk_...`), used against the Console inference gateway. Gateway serves model families per docs: Chat Completions at `https://opencode.ai/inference/openai/v1/chat/completions`, Anthropic Messages at `https://opencode.ai/inference/anthropic/v1/messages`, Bearer auth.
 - **S4**: "usemos de momento un modelo de local mas chico como el de Qwen2.5-VL-3B." — Vision phase (Phase 3+) defaults to Qwen2.5-VL-3B on the local RX 7600; recorded here for later phases, not implemented in Phase 0.
 - **S5**: Camera input is deferred and, when built, must run with a local model for privacy ("Esto esta en un veremos mas adelante ... IA local o con alguna que sea privativa para mayor seguridad").
+- **S7**: "La idea esque pueda realizarle preguntas, que indage por internet" — Phase 1 adds tool-calling: Ana may invoke registered tools during a chat turn and incorporate results before answering. Web search backend: **Brave Search API** with `BRAVE_API_KEY` (user decision, L6).
 - **S6**: Voice conversation (faster-whisper STT + Piper TTS) and the waifu avatar (Inochi2D-with-MCP preferred, PNG/SVG fallback) are later phases.
+- **S8**: Phase 1 system tools are read-only (hyprctl status/workspaces/activewindow, system info); destructive shell execution is out of scope until a permission model exists.
 
 ## Tasks
 
@@ -19,7 +21,12 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T2 | S2,S3 | config module: TOML providers, env-var key indirection, defaults | 78c4986 |
 | T3 | S2 | provider client: chat-completions SSE streaming adapter | 5ae0ce3 |
 | T4 | S1 | CLI chat loop: REPL cmds /exit /new /model /provider, one-shot -m | 9277cf7 |
-| T5 | S1 | README docs + smoke test against local Ollama | (this commit) |
+| T5 | S1 | README docs + smoke test against local Ollama | 2e2afb6 |
+| T6 | S3 | provider config: OpenCode Go Console gateway (correction of T2) | 4f7f159 |
+| T7 | S7 | client tool-calling: structured turn events for both dialects | (pending) |
+| T8 | S7 | agent loop: tool execution rounds with bounded iterations | (pending) |
+| T9 | S7,S8 | tools: Brave web search, hyprctl read-only, system info | (pending) |
+| T10 | S1,S7 | REPL integration (/tools on/off, graceful fallback), docs, smoke | (pending) |
 
 ## Log
 

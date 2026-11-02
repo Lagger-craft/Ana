@@ -70,11 +70,23 @@ class ProviderClient:
         system: str | None = None,
     ) -> Iterator[str]:
         """Yield assistant text deltas in order."""
+        for event in self.stream_turn(messages, model, system=system):
+            if event["type"] == "text":
+                yield event["content"]
+
+    def stream_turn(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        system: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> Iterator[dict]:
+        """Yield structured turn events (see tests/test_client_tools.py)."""
         if self.api_style == "anthropic":
-            url, payload = self._anthropic_request(messages, model, system)
+            url, payload = self._anthropic_request(messages, model, system, tools)
         else:
-            url, payload = self._chat_request(messages, model, system)
-        yield from self._open_stream(url, payload)
+            url, payload = self._chat_request(messages, model, system, tools)
+        yield from self._open_stream_turn(url, payload)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -88,24 +100,30 @@ class ProviderClient:
 
     def _chat_request(
         self, messages: list[dict[str, str]], model: str, system: str | None,
+        tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
         payload_messages = list(messages)
         if system:
             payload_messages.insert(0, {"role": "system", "content": system})
-        return (
-            self.base_url + "/chat/completions",
-            {"model": model, "messages": payload_messages, "stream": True},
-        )
+        payload: dict = {
+            "model": model, "messages": payload_messages, "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+        return self.base_url + "/chat/completions", payload
 
     def _anthropic_request(
         self, messages: list[dict[str, str]], model: str, system: str | None,
+        tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
         payload: dict = {"model": model, "messages": messages, "stream": True}
         if system:
             payload["system"] = system
+        if tools:
+            payload["tools"] = tools
         return self.base_url + "/messages", payload
 
-    def _open_stream(self, url: str, payload: dict) -> Iterator[str]:
+    def _open_stream_turn(self, url: str, payload: dict) -> Iterator[dict]:
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 with client.stream(
@@ -116,19 +134,27 @@ class ProviderClient:
                         raise ProviderError(
                             f"provider returned HTTP {response.status_code}: "
                             f"{_error_detail(body, response.status_code)}")
-                    yield from self._iter_deltas(response)
+                    if self.api_style == "anthropic":
+                        yield from self._anthropic_turn(response)
+                    else:
+                        yield from self._chat_turn(response)
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"cannot reach {url}: {exc.__class__.__name__}: {exc}") from exc
 
-    def _iter_deltas(self, response: httpx.Response) -> Iterator[str]:
-        """Yield text deltas from an SSE response body, per api_style."""
-        if self.api_style == "anthropic":
-            yield from self._anthropic_deltas(response)
-        else:
-            yield from self._chat_deltas(response)
 
-    def _chat_deltas(self, response: httpx.Response) -> Iterator[str]:
+    def _parse_json_obj(self, raw: str) -> dict:
+        """Parse tool-call argument JSON; fall back to an error marker."""
+        try:
+            parsed = json.loads(raw or "{}")
+            return parsed if isinstance(parsed, dict) else {"__value__": parsed}
+        except json.JSONDecodeError:
+            return {"__raw__": raw}
+
+    def _chat_turn(self, response: httpx.Response) -> Iterator[dict]:
+        """OpenAI Chat Completions SSE -> structured events, after full read."""
+        pending: dict[int, dict] = {}
+        finish_reason = "stop"
         for raw in response.iter_lines():
             line = raw.strip()
             if not line or line.startswith(":"):
@@ -149,12 +175,37 @@ class ProviderClient:
                 err = event["error"]
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 raise ProviderError(f"provider error: {msg or event}")
-            delta = event.get("choices", [{}])[0].get("delta", {})
+            choice = event.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
             text = delta.get("content")
             if text:
-                yield text
+                yield {"type": "text", "content": text}
+            for tc in delta.get("tool_calls", []):
+                idx = tc.get("index", 0)
+                slot = pending.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["args"] += fn["arguments"]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+        for idx in sorted(pending):
+            slot = pending[idx]
+            yield {
+                "type": "tool_call", "id": slot["id"] or str(idx),
+                "name": slot["name"],
+                "arguments": self._parse_json_obj(slot["args"]),
+            }
+        yield {"type": "finish", "finish_reason": finish_reason}
 
-    def _anthropic_deltas(self, response: httpx.Response) -> Iterator[str]:
+    def _anthropic_turn(self, response: httpx.Response) -> Iterator[dict]:
+        """Anthropic Messages SSE -> structured events, after full read."""
+        blocks: dict[int, dict] = {}
+        current_text: list[str] | None = None
+        stop_reason = "end_turn"
         for raw in response.iter_lines():
             line = raw.strip()
             if not line or line.startswith(":"):
@@ -163,9 +214,8 @@ class ProviderClient:
                 continue
             if not line.startswith("data:"):
                 continue
-            payload = line[len("data:"):].strip()
             try:
-                event = json.loads(payload)
+                event = json.loads(line[len("data:"):].strip())
             except json.JSONDecodeError as exc:
                 raise ProviderError(
                     f"malformed SSE chunk from provider: {exc}") from exc
@@ -173,7 +223,40 @@ class ProviderClient:
             if etype == "error":
                 err = event.get("error", {})
                 raise ProviderError(f"provider error: {err.get('message', event)}")
-            if etype == "content_block_delta":
+            if etype == "content_block_start":
+                block = event.get("content_block", {})
+                if block.get("type") == "text":
+                    current_text = []
+                elif block.get("type") == "tool_use":
+                    blocks[event.get("index", 0)] = {
+                        "id": block.get("id", ""), "name": block.get("name", ""),
+                        "args": "",
+                    }
+            elif etype == "content_block_delta":
                 delta = event.get("delta", {})
-                if delta.get("type") == "text_delta" and delta.get("text"):
-                    yield delta["text"]
+                dtype = delta.get("type")
+                if dtype == "text_delta" and delta.get("text"):
+                    if current_text is None:  # no start event seen (lenient)
+                        current_text = []
+                    current_text.append(delta["text"])
+                    yield {"type": "text", "content": delta["text"]}
+                elif dtype == "input_json_delta" and delta.get("partial_json"):
+                    slot = blocks.get(event.get("index", -1))
+                    if slot is not None:
+                        slot["args"] += delta["partial_json"]
+            elif etype == "content_block_stop":
+                if current_text is not None:
+                    current_text = None
+                idx = event.get("index", -1)
+                slot = blocks.pop(idx, None)
+                if slot is not None:
+                    yield {
+                        "type": "tool_call", "id": slot["id"],
+                        "name": slot["name"],
+                        "arguments": self._parse_json_obj(slot["args"]),
+                    }
+            elif etype == "message_delta":
+                reason = event.get("delta", {}).get("stop_reason")
+                if reason:
+                    stop_reason = reason
+        yield {"type": "finish", "finish_reason": stop_reason}
