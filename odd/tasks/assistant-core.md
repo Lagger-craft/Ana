@@ -50,7 +50,7 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T26 | S9,S13 | voz en la TUI: /voice on|off, push-to-talk por Enter vacío, respuesta hablada | 8929d4d |
 | T27 | S8 | current_time tool (hora/fecha, zona IANA opcional) | edeeec6 |
 | T28 | S13 | TUI polish: colores por rol, bienvenida, /help+/ayuda | edeeec6 |
-| T29 | S13 | TUI polish 2: historial de entrada (Arriba/Abajo), flag ⏳ respondiendo en el status, ANA_TIMEZONE para la tool de hora | (pending commit) |
+| T29 | S13 | TUI polish 2: historial de entrada (Arriba/Abajo), flag ⏳ respondiendo en el status, ANA_TIMEZONE para la tool de hora | 621372b |
 
 ## Log
 
