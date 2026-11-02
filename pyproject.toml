@@ -1,0 +1,19 @@
+[project]
+name = "ana"
+version = "0.0.1"
+description = "Ana - waifu virtual assistant for Hyprland/Linux (Phase 0: chat CLI)"
+requires-python = ">=3.12"
+dependencies = ["httpx>=0.28"]
+
+[project.scripts]
+ana = "ana.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ana*"]
