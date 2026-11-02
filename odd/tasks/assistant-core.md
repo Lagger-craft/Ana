@@ -23,10 +23,10 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T4 | S1 | CLI chat loop: REPL cmds /exit /new /model /provider, one-shot -m | 9277cf7 |
 | T5 | S1 | README docs + smoke test against local Ollama | 2e2afb6 |
 | T6 | S3 | provider config: OpenCode Go Console gateway (correction of T2) | 4f7f159 |
-| T7 | S7 | client tool-calling: structured turn events for both dialects | (pending) |
-| T8 | S7 | agent loop: tool execution rounds with bounded iterations | (pending) |
-| T9 | S7,S8 | tools: Brave web search, hyprctl read-only, system info | (pending) |
-| T10 | S1,S7 | REPL integration (/tools on/off, graceful fallback), docs, smoke | (pending) |
+| T7 | S7 | client tool-calling: structured turn events for both dialects | e2f1ece |
+| T8 | S7 | agent loop: tool execution rounds with bounded iterations | fe1ab38 |
+| T9 | S7,S8 | tools: Brave web search, hyprctl read-only, system info | c172ebd |
+| T10 | S1,S7 | REPL integration (/tools on/off, graceful fallback), docs, smoke | (this commit) |
 
 ## Log
 
@@ -35,3 +35,4 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 - **L3** (correction/clarification): VRAM concern → for the local vision route, use Qwen2.5-VL-3B first (S4); camera models must have decent privacy/permissions (S5). Provider clarification: "Sobre el 'provedor' Opencode, me refiero a opencode go, con la api key." (S3).
 - **L5** (correction, verbatim): "Sobre los modelos de Zen no lo quiero. Estoy hablando del plan Opencode Go. Te permite entrar a tus ajustes de usuario y generar una api key. Esa es la que quiero hacer uso. Una vez esa aclaracion seria bueno continuar con la siguiente fase. Una vez me confirmes de que puedo interactuar aunque sea via chat, lo pruebo yo mismo para tener un test mas real." — replaced the Zen provider config with the two OpenCode Go gateway providers (S3 rewritten, T2 corrected by T6).
 - **L4** (evidence): Phase 0 complete. 34 unit tests pass. Smoke test against local Ollama (`qwen2.5-coder:1.5b`, `api_style=chat` on `http://127.0.0.1:11434/v1`) streamed a real reply through the CLI (one-shot exit 0, REPL /model + /exit exit 0). Error paths verified live: missing config (exit 1 + `ana init` hint). Starter config written to `~/.config/ana/config.toml`. Known limitation: OpenCode Zen GPT* models need the Responses API, not yet supported (documented in README + config template).
+- **L7** (evidence): Phase 1 complete. 63 tests pass. Client stream_turn tool-calling (chat + anthropic), bounded agent loop, 7 default tools. Live verify: hypr_workspaces -j ran against the real Hyprland session (workspace DP-2 JSON returned); system_info correct; REPL /tools list; ollama one-shot with tools enabled streamed a reply (exit 0). Brave search untested live pending user API key (BRAVE_API_KEY). Web search backend decision recorded in L6 (Brave, L6 user pick). OpenCode Go gateway config in place for user self-test with oc_sk_ key.

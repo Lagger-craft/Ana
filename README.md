@@ -10,7 +10,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 | Phase | Scope |
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
-| 1 | tool-calling: web search, Hyprland tools (`hyprctl`, `grim`, `wl-clipboard`) |
+| **1** ✅✨ | tool-calling: Brave web search, Hyprland read-only queries, system info, graceful no-tools fallback |
 | 2 | voice loop: faster-whisper STT + Piper TTS |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
 | 4 | waifu avatar overlay (layer-shell), emotion tags |
@@ -48,24 +48,40 @@ Config keys: `default_provider`, `system_prompt`, and one
 (`chat` for OpenAI-compatible endpoints, `anthropic` for the Messages
 API), `api_key_env`, `default_model`.
 
+To let Ana search the web, also export `BRAVE_API_KEY`
+(free tier: https://brave.com/search/api/).
+
 ## Usage
 
 ```sh
-.venv/bin/ana                    # interactive chat REPL
+.venv/bin/ana                    # interactive chat REPL (tools on)
 .venv/bin/ana --provider ollama  # force a provider for this session
+.venv/bin/ana --no-tools         # plain streaming chat, no tool calls
 .venv/bin/ana chat               # same as bare `ana`
-.venv/bin/ana -m "hi there"     # one-shot prompt, prints and exits
+.venv/bin/ana -m "busca que hay de nuevo en hyprland"  # may search with BRAVE_API_KEY
+.venv/bin/ana -m "info del sistema"                    # picks system_info tool
 .venv/bin/ana init               # (re)create the starter config
 ```
 
 REPL commands: `/exit`, `/new` (clear history), `/model [name]`,
-`/provider [name]`.
+`/provider [name]`, `/tools [on|off|list]`.
+
+If a provider rejects the tools payload (e.g. a small local model), Ana
+retries the turn without tools and keeps tools off for the session;
+system tools are read-only for now (`hyprctl ... -j`, no dispatch).
 
 Example, fully local (no cloud involved):
 
 ```sh
 ollama serve &                   # if not already running
 .venv/bin/ana --provider ollama -m "Say hello in three words"
+```
+
+Example, fully local (no cloud involved):
+
+```sh
+ollama serve &                   # if not already running
+.venv/bin/ana --provider ollama --no-tools -m "Say hello in three words"
 ```
 
 ## Tests

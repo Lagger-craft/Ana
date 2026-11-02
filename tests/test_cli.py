@@ -109,7 +109,7 @@ class TestMain:
             "ana.cli.build_stream",
             lambda cfg, provider=None: lambda msgs, model, system=None:
                 iter(["hi", " there"]))
-        rc = main(["--config", str(cfg), "--message", "hi"])
+        rc = main(["--config", str(cfg), "--message", "hi", "--no-tools"])
         assert rc == 0
         assert "hi there" in capsys.readouterr().out
 
@@ -138,7 +138,7 @@ class TestMain:
 
         import ana.cli as cli_module
         cli_module.build_stream = lambda cfg, provider=None: boom
-        rc = main(["--config", str(cfg), "--message", "hi"])
+        rc = main(["--config", str(cfg), "--message", "hi", "--no-tools"])
         assert rc == 1
         assert "oops" in capsys.readouterr().err
 

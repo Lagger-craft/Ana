@@ -15,13 +15,15 @@ import sys
 from collections.abc import Callable, Iterator
 
 from . import __version__
+from .agent import AgentError, ToolRegistry, run_agent
 from .client import ProviderClient, ProviderError
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
+from .tools import build_default_tools
 
 StreamFn = Callable[..., Iterator[str]]
 
 COMMAND_HELP = (
-    "commands: /exit, /new, /model [name], /provider [name]")
+    "commands: /exit, /new, /model [name], /provider [name], /tools [on|off|list]")
 
 
 def build_stream(cfg: Config, provider: Provider) -> StreamFn:
@@ -52,6 +54,10 @@ def run_repl(
     models: dict[str, str] | None = None,
     model_override: str | None = None,
     provider_override: str | None = None,
+    tools: bool = True,
+    registry: ToolRegistry | None = None,
+    client_fx: object | None = None,
+    max_rounds: int = 4,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
 
@@ -69,6 +75,8 @@ def run_repl(
     history: list[dict[str, str]] = []
     injected = stream is not None
     stream_fn = stream
+    tools_on = tools
+    active_registry: ToolRegistry | None = registry
 
     def current_stream() -> StreamFn:
         nonlocal stream_fn
@@ -125,30 +133,113 @@ def run_repl(
                     emit(f"provider: {provider} "
                          f"(model: {model or _default_model(cfg, provider, models)})")
                 continue
+            elif cmd == "tools":
+                if arg == "off":
+                    tools_on = False
+                    active_registry = None
+                    emit("tools off")
+                elif arg == "on":
+                    tools_on = True
+                    active_registry = registry or _default_registry()
+                    emit(f"tools on ({', '.join(active_registry.names())})")
+                elif arg == "list":
+                    names = (active_registry or _default_registry()).names()
+                    emit("tools: " + (", ".join(names) or "(none)"))
+                else:
+                    current = "on" if tools_on else "off"
+                    emit(f"tools: {current} (usage: /tools [on|off|list])")
+                continue
             else:
                 emit(f"unknown command: /{cmd} ({COMMAND_HELP})")
                 continue
 
         # regular chat turn
-        history.append({"role": "user", "content": line})
-        active_model = model or _default_model(cfg, provider, models)
-        chunks: Iterator[str] = iter(())
-        try:
-            chunks = current_stream()(history, active_model,
-                                     system=cfg.system_prompt or None)
-            reply = []
-            for text in chunks:
-                emit(text)
-                reply.append(text)
-        except (ProviderError, ConfigError) as exc:
-            emit(f"error: {exc}")
-            history.pop()  # roll back the failed turn
-            emit("")  # keep typing UX sane after a streamed failure
-            continue
-        history.append({"role": "assistant", "content": "".join(reply)})
+        turn_state = _do_turn(cfg, provider, models, model, history, line,
+                              emit, current_stream, tools_on,
+                              active_registry, client_fx, max_rounds)
+        if turn_state == "tools-unavailable":
+            tools_on = False  # stay off for the rest of the session
         emit("")
 
     return history
+
+
+def _do_turn(cfg, provider, models, model, history, line, emit,
+             current_stream, tools_on, active_registry, client_fx, max_rounds):
+    """Execute one chat turn with tools (or a plain stream fallback).
+
+    ``client_fx`` (test/adapter object) is the turn-level client for both
+    paths when given. On a provider rejection of the tools payload
+    (HTTP 4xx), the turn retries once without tools; the caller disables
+    tools for the rest of the session. Any failure rolls the whole
+    user turn out of history.
+    """
+    base_len = len(history)
+    history.append({"role": "user", "content": line})
+    active_model = model or _default_model(cfg, provider, models)
+    system = cfg.system_prompt or None
+    used_tools = tools_on and active_registry is not None and len(active_registry)
+    try:
+        if used_tools:
+            client = client_fx if client_fx is not None else _turn_client(cfg, provider)
+            run_agent(
+                client, history, active_model, active_registry,
+                emit=emit, system=system, max_rounds=max_rounds,
+                on_tool=lambda name, args: emit(f"⚙ {name}({args})"),
+            )
+        else:
+            _plain_stream(history, active_model, system, emit,
+                          current_stream, client_fx)
+    except (ProviderError, ConfigError, AgentError) as exc:
+        msg = str(exc)
+        if used_tools and "HTTP 4" in msg:
+            # the rejection applies to the tools payload; go plain once
+            del history[base_len:]
+            history.append({"role": "user", "content": line})
+            try:
+                _plain_stream(history, active_model, system, emit,
+                              current_stream, client_fx)
+                emit("(tools disabled for this model, continuing plain)")
+                return "tools-unavailable"
+            except (ProviderError, ConfigError, AgentError) as retry_exc:
+                emit(f"error: {retry_exc}")
+                del history[base_len:]
+                emit("")
+                return "error"
+        emit(f"error: {msg}")
+        del history[base_len:]  # roll back this whole turn
+        emit("")  # keep typing UX sane after a streamed failure
+        return "error"
+    return "ok"
+
+
+def _plain_stream(history, active_model, system, emit, current_stream,
+                  client_fx):
+    """Stream a reply without tools; append assistant to history."""
+    reply = []
+    if client_fx is not None:
+        events = client_fx.stream_turn(history, active_model, system=system,
+                                       tools=None)
+        for ev in events:
+            if ev["type"] == "text":
+                emit(ev["content"])
+                reply.append(ev["content"])
+            elif ev["type"] == "finish":
+                break
+    else:
+        for text in current_stream()(history, active_model, system=system):
+            emit(text)
+            reply.append(text)
+    history.append({"role": "assistant", "content": "".join(reply)})
+
+
+def _turn_client(cfg: Config, provider_name: str) -> ProviderClient:
+    p = cfg.provider(provider_name)
+    return ProviderClient.from_provider(cfg, p)
+
+
+def _default_registry() -> ToolRegistry:
+    return build_default_tools()
 
 
 def _default_model(cfg: Config, provider_name: str, models: dict[str, str] | None) -> str:
@@ -182,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", help="model id override")
     parser.add_argument("--message", "-m",
                         help="one-shot prompt; print and exit")
+    parser.add_argument("--no-tools", action="store_true",
+                        help="disable tool calling for this session")
 
     args = parser.parse_args(argv)
 
@@ -203,14 +296,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.message:
             cfg = load_config(cfg_path)
             p = cfg.provider(args.provider)
-            stream = build_stream(cfg, p)
             model = args.model or p.default_model
             try:
-                for text in stream([{"role": "user", "content": args.message}],
-                                   model, system=cfg.system_prompt or None):
-                    print(text, end="", flush=True)
-                print()
-            except (ProviderError, ConfigError) as exc:
+                if args.no_tools:
+                    stream = build_stream(cfg, p)
+                    for text in stream([{ "role": "user",
+                                          "content": args.message}],
+                                       model, system=cfg.system_prompt or None):
+                        print(text, end="", flush=True)
+                    print()
+                else:
+                    run_agent(
+                        _turn_client(cfg, args.provider),
+                        [{"role": "user", "content": args.message}],
+                        model, _default_registry(),
+                        emit=lambda t: print(t, end="", flush=True),
+                        system=cfg.system_prompt or None,
+                    )
+                    print()
+            except (ProviderError, ConfigError, AgentError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             return 0
@@ -219,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg_path,
             model_override=args.model,
             provider_override=args.provider,
+            tools=not args.no_tools,
         )
         return 0
     except ConfigError as exc:
