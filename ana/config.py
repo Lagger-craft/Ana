@@ -124,8 +124,9 @@ def write_template(path: Path) -> None:
     path.write_text(CONFIG_TEMPLATE)
 
 
-def load_config(path: Path) -> Config:
+def load_config(path: str | Path) -> Config:
     """Parse config.toml into a Config, validating structure."""
+    path = Path(path)
     if not path.exists():
         raise ConfigError(
             f"config file not found: {path}\n"
