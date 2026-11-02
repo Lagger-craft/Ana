@@ -560,10 +560,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="full-screen Textual interface (same as "
                              "`ana tui`)")
     parser.add_argument("command", nargs="?",
-                        choices=("init", "chat", "tui", "waifu"),
+                        choices=("init", "chat", "tui", "waifu", "talk"),
                         help="init: write starter config; chat: REPL "
                              "(default); tui: full-screen interface; "
-                             "waifu: PNG avatar overlay window")
+                             "waifu: PNG avatar overlay window; talk: "
+                             "headless voice hotkey — record → turn → "
+                             "spoken reply, no window (global "
+                             "push-to-talk for Hyprland)")
     parser.add_argument("--config", help="path to config.toml")
     parser.add_argument("--provider", help="provider name from the config")
     parser.add_argument("--model", help="model id override")
@@ -633,6 +636,13 @@ def main(argv: list[str] | None = None) -> int:
             from .overlay import main as overlay_main, run_overlay
 
             return run_overlay()
+
+        if args.command == "talk":
+            # headless voice hotkey (S15c): no TTY, no window — state
+            # under $XDG_RUNTIME_DIR/ana/, toggle per key press
+            from .talk import run_talk
+
+            return run_talk(cfg_path, stt=args.stt)
 
         if args.tui or args.command == "tui":
             from .tui import run_tui

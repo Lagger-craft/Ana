@@ -63,6 +63,7 @@ To let Ana search the web, also export `TAVILY_API_KEY`
 .venv/bin/ana -m "busca que hay de nuevo en hyprland"  # may search with TAVILY_API_KEY
 .venv/bin/ana -m "info del sistema"                    # picks system_info tool
 .venv/bin/ana init               # (re)create the starter config
+.venv/bin/ana talk               # headless voice hotkey round (see Voice)
 ```
 
 REPL commands: `/exit`, `/new` (clear history), `/model [name]`,
@@ -167,6 +168,26 @@ and the classic REPL (`ana`) push each reply as a `say` event, and voice
 rounds wrap the Piper speak with `state: talk` → `state: idle` (S15b),
 so the waifu reacts the same way no matter where you chat.
 
+### Keyboard shortcuts (S15)
+
+Two Hyprland bindings (Omarchy: `~/.config/hypr/bindings.lua`),
+adjust the paths to your clone:
+
+```lua
+-- overlay (if not already running) + chat TUI, one key
+o.bind("SUPER + A", "Ana waifu", "/home/<you>/Projects/Ana/scripts/ana-quick")
+-- global push-to-talk toggle: press to record, press again to send
+o.bind("SUPER + ALT + A", "Ana hablar", "/home/<you>/Projects/Ana/.venv/bin/ana talk")
+```
+
+- `SUPER + A` runs `scripts/ana-quick`: it starts `ana waifu` **only if
+  no overlay is already live** (anchored `pgrep`, so a second instance
+  never splits the FIFO events) and opens the TUI in your default
+  terminal.
+- `SUPER + ALT + A` runs the headless voice round (`ana talk`,
+  documented under [Global voice hotkey](#global-voice-hotkey--ana-talk-s15c))
+  — no window needs focus.
+
 ## Voice (Phase 2)
 
 Bidirectional voice, **fully local** (S9/S10): voxtype for
@@ -258,6 +279,43 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
 - If a dependency or device is missing (no `voxtype`, no `piper`,
   no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
   running in text mode — the REPL never crashes on voice errors.
+
+### Global voice hotkey — `ana talk` (S15c)
+
+A headless voice round with **no window and no terminal focus**, so a
+Hyprland keybinding can talk to Ana from anywhere:
+
+```sh
+# ~/.config/hypr/bindings.lua (Omarchy) — adjust the venv path
+bind = SUPER ALT, A, exec, /home/<you>/Projects/Ana/.venv/bin/ana talk
+```
+
+Hyprland fires on key **press** only (no release), so this is a
+two-press toggle, not hold-to-talk:
+
+- **press 1** (no active round) → notify “🎙 grabando… (otra vez el
+  atajo para cortar)”, then record the mic — auto-stops at
+  `ANA_VOICE_MAX_SECONDS` (default 12 s) or when you press again,
+  whichever comes first;
+- **press 2** (recording) → touches the stop-file and exits 0
+  immediately — it never blocks;
+- **press 3 while Ana is past the mic** (transcribing/answering) →
+  no-op with “ya estoy respondiendo”, so it can’t corrupt the round.
+
+The transcript runs through the **same turn engine as the REPL**
+(tools, provider config, error rollback, Piper reply and the waifu
+say/talk/idle events) — `talk` is orchestration, not a second code
+path. Session state lives in `$XDG_RUNTIME_DIR/ana/{talk.json,talk.stop}`
+beside the waifu FIFO and is cleared after every round; a crashed
+worker’s dead pid is detected, so the next press starts fresh.
+
+Feedback is headless: `notify-send` desktop notifications (recording
+start, `(no escuché nada)`, `(voice unavailable: …)` and the first
+120 chars of the reply) plus a `🎙 te escucho…` subtitle on the waifu
+overlay when it’s running. Streamed turn output goes nowhere by
+default (no TTY to write to); set `ANA_TALK_DEBUG=/path/to/log` to
+append it to a file. `--stt` and `--config` work as everywhere else:
+`.venv/bin/ana --stt whisper talk`.
 
 ### Privacy
 
