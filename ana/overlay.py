@@ -1,0 +1,198 @@
+"""Waifu overlay window (S14): GTK4 + gtk4-layer-shell, JVía JSON stdin.
+
+Runs `ana waifu`: a non-decorated always-on-top layer-surface anchored
+top-right of the Hyprland screen. It reads JSON lines from stdin (tests
+pipe; the CLI producers write to a FIFO — see waifu.fifo_path) and
+applies them through ana.waifu.parse_event / WaifuState.coerce:
+
+    {"type": "state", "state": "talk"}   avatar mouth state
+    {"type": "say",   "text": "..."}     subtitle line
+    {"type": "quit"}                     exit
+
+Missing avatar PNGs degrade to a numbered placeholder (so the window is
+testable without art); the real PNGs go to ~/.local/share/ana/waifu/.
+"""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import sys
+
+from .waifu import (parse_event, resolve_asset, WaifuState)
+
+def _placeholder(name: str) -> bytes:
+    """A plain rounded rect with the state name, so tests without art
+    still show something stable."""
+    import base64
+
+    color = {"idle": "#6c71c4", "talk": "#b58900"}.get(name, "#586e75")
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220">
+<rect x="10" y="10" width="200" height="200" rx="24" fill="{color}" stroke="#073642" stroke-width="4"/>
+<text x="110" y="120" font-size="28" fill="#fdf6e3" text-anchor="middle"
+ font-family="sans-serif">{name}</text></svg>'''
+    return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}".encode()
+
+
+def read_events_forever(apply=None, stream=None):
+    """Blocking event loop: one JSON line per event, EOF quits.
+
+    `apply(state, subtitle)` receives the parsed pair (Pure logic seam:
+    tests drive it without GTK.) Returns True when events were consumed
+    (None on clean EOF also means we are done).
+    """
+    stream = stream if stream is not None else sys.stdin
+    state = WaifuState.IDLE
+    subtitle = ""
+    for line in stream:
+        line = line.strip()
+        if not line:
+            continue
+        if line == '{"type": "quit"}':
+            return WaifuState.IDLE
+        new_state, new_subtitle = parse_event(line)
+        if new_state is not None:
+            state = WaifuState.coerce(new_state)
+        if new_subtitle is not None:
+            subtitle = new_subtitle
+        if apply is not None:
+            apply(state.value, subtitle)
+    return WaifuState.IDLE
+
+
+ANA_WAIFU_DEBUG = os.environ.get("ANA_WAIFU_DEBUG") or \
+    os.environ.get("ANA_TUI_DEBUG", "")
+
+
+def _dbg(fmt: str, *args) -> None:
+    """Opt-in trace to $ANA_WAIFU_DEBUG (file path)."""
+    if not ANA_WAIFU_DEBUG:
+        return
+    try:
+        import time
+        with open(ANA_WAIFU_DEBUG, "a") as fh:
+            fh.write(f"{time.strftime('%H:%M:%S')} "
+                     + (fmt % args if args else fmt) + "\n")
+    except OSError:
+        pass
+
+
+def _reexec_system_python() -> "NoReturn":
+    """os.execl the system /usr/bin/python3 for this overlay process."""
+    import pathlib
+
+    pkg_parent = str(pathlib.Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    extra = env.get("PYTHONPATH", "")
+    if pkg_parent not in extra.split(os.pathsep):
+        env["PYTHONPATH"] = (pkg_parent + os.pathsep
+                             + extra).rstrip(os.pathsep)
+    os.execl("/usr/bin/python3", "python3", "-m", "ana.overlay",
+             *sys.argv[1:])
+
+
+def run_overlay() -> int:
+    """Entry: Gtk4 layer-shell surface driven by JSON on stdin."""
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Gtk4LayerShell", "1.0")
+        from gi.repository import Gtk4LayerShell, Gtk, GLib  # noqa: F401
+        if not Gtk4LayerShell.is_supported():
+            # libgtk4-layer-shell must load BEFORE libwayland-client;
+            # the known fix is LD_PRELOAD — set it and re-exec once.
+            lib = "/usr/lib/libgtk4-layer-shell.so"
+            if os.path.exists(lib) and not os.environ.get("_ANA_LAYER_PRELOAD"):
+                os.environ["_ANA_LAYER_PRELOAD"] = "1"
+                preload = {lib: 1}
+                os.environ["LD_PRELOAD"] = os.environ.get("LD_PRELOAD", "") +                     f"{os.pathsep}{lib}"
+                _reexec_system_python()
+            print("error: the compositor does not support the layer-shell "
+                  "protocol (requires a Wayland session)",
+                  file=sys.stderr); return 1
+    except ImportError:
+        # the project venv isolates system site-packages; PyGTK lives in
+        # /usr — re-exec with the system interpreter (overlay needs no
+        # venv-only deps: stdlib + the ana package path).
+        _reexec_system_python()
+    except ValueError as exc:
+        print(f"error: GTK4/gtk4-layer-shell version mismatch ({exc}) — "
+              "install gtk-layer-shell (pacman -S gtk-layer-shell)",
+              file=sys.stderr)
+        return 1
+
+    window = Gtk.Window()
+    window.set_decorated(False)
+    # layer-shell init must happen before the window maps
+    Gtk4LayerShell.init_for_window(window)
+    _dbg("init done; is_layer=%s supported=%s",
+         Gtk4LayerShell.is_layer_window(window),
+         Gtk4LayerShell.is_supported())
+    Gtk4LayerShell.set_namespace(window, "ana-waifu")
+    Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
+    # must anchor at least one edge or the surface never maps; the waifu
+    # lives top-right: TOP | RIGHT with a 12px margin
+    for edge, anchored, margin in ((Gtk4LayerShell.Edge.TOP, True, 12),
+                                   (Gtk4LayerShell.Edge.RIGHT, True, 12)):
+        Gtk4LayerShell.set_anchor(window, edge, anchored)
+        Gtk4LayerShell.set_margin(window, edge, margin)
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    avatar = Gtk.Image()
+    avatar.set_pixel_size(220)
+    subtitle = Gtk.Label(label="Ana 👋 · /say on the way")
+    subtitle.set_wrap(True)
+    subtitle.set_max_width_chars(46)
+    box.append(avatar)
+    box.append(subtitle)
+    window.set_child(box)
+
+    placeholders: dict[str, str] = {}
+
+    def placeholder_file(name: str) -> str:
+        """SVG placeholder rendered to a temp file, cached per state."""
+        import tempfile
+
+        if name not in placeholders:
+            data = _placeholder(name)
+            with tempfile.NamedTemporaryFile(
+                    prefix=f"ana-waifu-{name}-", suffix=".svg",
+                    delete=False) as fh:
+                fh.write(data)
+                placeholders[name] = fh.name
+        return placeholders[name]
+
+    def apply(state_name: str, text: str | None) -> None:
+        if text is not None:
+            subtitle.set_text(text)
+        png = resolve_asset(state_name)
+        avatar.set_from_file(str(png) if png is not None
+                             else placeholder_file(state_name))
+
+    _dbg("window size after full setup: %s x %s",
+         window.get_width(), window.get_height())
+    # the STDIN reader runs in a daemon thread: blocking reads MUST NOT
+    # sit on the GTK main loop or the window paints nothing (a:0 ghost
+    # surface — the exact reason the first overlay was invisible)
+    import threading
+    from gi.repository import GLib
+
+    def map_apply(state_name: str, text):
+        """Thread-safe apply: the widgets update on the GTK main loop."""
+        GLib.idle_add(apply, state_name, text)
+
+    threading.Thread(target=read_events_forever,
+                     daemon=True, args=(map_apply,)).start()
+    _loop = GLib.MainLoop()
+    _loop.run()
+    if state_id == WaifuState.IDLE:
+        pass  # nothing further: EOF ends the stream and with it the app
+    return 0
+
+
+def main(argv=None) -> int:
+    return run_overlay()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

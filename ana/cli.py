@@ -548,9 +548,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="full-screen Textual interface (same as "
                              "`ana tui`)")
     parser.add_argument("command", nargs="?",
-                        choices=("init", "chat", "tui"),
+                        choices=("init", "chat", "tui", "waifu"),
                         help="init: write starter config; chat: REPL "
-                             "(default); tui: full-screen interface")
+                             "(default); tui: full-screen interface; "
+                             "waifu: PNG avatar overlay window")
     parser.add_argument("--config", help="path to config.toml")
     parser.add_argument("--provider", help="provider name from the config")
     parser.add_argument("--model", help="model id override")
@@ -615,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             return 0
+
+        if args.command == "waifu":
+            from .overlay import main as overlay_main
+
+            return overlay_main()
 
         if args.tui or args.command == "tui":
             from .tui import run_tui
