@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -31,6 +32,21 @@ PIPER_MISSING_MSG = (
 def _run(cmd, **kw):
     """Run a subprocess. Module-level seam so tests can monkeypatch it."""
     return subprocess.run(cmd, **kw)
+
+
+def _piper_binary() -> str | None:
+    """Locate piper: PATH first, then the project venv's bin dir.
+
+    The pip ``piper-tts`` package installs the binary into ``.venv/bin``,
+    which is not on PATH when Ana is invoked as ``.venv/bin/ana``.
+    """
+    found = shutil.which("piper")
+    if found:
+        return found
+    venv_bin = Path(sys.executable).parent / "piper"
+    if venv_bin.is_file():
+        return str(venv_bin)
+    return None
 
 
 def resolve_voice() -> str:
@@ -70,7 +86,7 @@ class PiperTTS:
 
     def speak(self, text: str) -> None:
         """Speak `text` aloud; the temp WAV is removed after playback."""
-        piper = shutil.which("piper")
+        piper = _piper_binary()
         if piper is None:
             raise VoiceError(PIPER_MISSING_MSG)
         voice = self.voice if self.voice is not None else resolve_voice()

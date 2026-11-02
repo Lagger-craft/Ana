@@ -117,8 +117,11 @@ class TestPiperTTS:
         assert not Path(wav).exists()  # tmp wav gone after playback
         assert calls[1][0] == ["/usr/bin/paplay", wav]
 
-    def test_missing_piper_raises_actionable_voice_error(self, monkeypatch):
+    def test_missing_piper_raises_actionable_voice_error(self, monkeypatch,
+                                                         tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: None)
+        # also hide the venv bin fallback: pretend we run from nowhere
+        monkeypatch.setattr("ana.voice.tts.sys", _no_exec_sys(tmp_path))
         with pytest.raises(VoiceError) as excinfo:
             PiperTTS(voice="/models/x.onnx").speak("hola")
         msg = str(excinfo.value)
@@ -285,3 +288,29 @@ class TestMainVoiceFlag:
             lambda cfg_path, **kw: seen.update(kw) or [])
         assert main(["--config", str(cfg)]) == 0
         assert seen["voice"] is False
+
+
+def _ok_proc():
+    import subprocess
+    return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+
+def _no_exec_sys(tmp_path):
+    """sys stub whose executable lives in an empty dir (no venv piper)."""
+    import types
+    stub = types.SimpleNamespace()
+    stub.executable = str(tmp_path / "nowhere" / "python")
+    return stub
+
+
+def test_piper_binary_falls_back_to_venv_bin(monkeypatch, tmp_path):
+    """piper-tts installs into .venv/bin; PATH lookup may miss it."""
+    import ana.voice.tts as tts_mod
+    fake_piper = tmp_path / "piper"
+    fake_piper.write_text("#!/bin/sh\n")
+    fake_piper.chmod(0o755)
+    monkeypatch.setattr(tts_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(tts_mod.subprocess, "run", lambda *a, **k: _ok_proc())
+    monkeypatch.setattr(tts_mod.sys, "executable", str(tmp_path / "python"))
+    tts_inst = tts_mod.PiperTTS(voice=str(tmp_path / "voice.onnx"))  # noqa: F841 (used below)
+    assert tts_mod._piper_binary() == str(fake_piper)
