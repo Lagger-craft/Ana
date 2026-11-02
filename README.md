@@ -13,6 +13,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 | **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
 | **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, opt-in) |
 | **3** ✅ | images: local vision (Repl `/img`, one-shot `--image`), vision_model auto-pick |
+| **4** ✅ | TUI (Textual): full-screen chat, same turn engine; opt-in `.tui` extra |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
 | 4 | waifu avatar overlay (layer-shell), emotion tags |
 | 5 | Inochi2D rigging via an MCP-driven Inochi Creator (PNG fallback if the spike fails) |
@@ -67,6 +68,24 @@ To let Ana search the web, also export `TAVILY_API_KEY`
 REPL commands: `/exit`, `/new` (clear history), `/model [name]`,
 `/provider [name]`, `/tools [on|off|list]`, `/voice [on|off|status]`,
 `/img <ruta>` (queue images for the next message).
+
+### TUI (Phase 4)
+
+Opt-in interface for a full-screen Textual session. ONE turn engine:
+provider, tools, image queue and vision pick behave exactly like the
+REPL — the TUI is a frontend, not a fork.
+
+```sh
+.venv/bin/pip install -e '.[tui]'
+.venv/bin/ana tui          # or: ana --tui --provider ollama
+```
+
+- Chat panel streams the same reply texts; the status bar shows model,
+  provider, tools state and the pending-image count.
+- Commands: `/model [name]`, `/provider [name]`, `/new`, `/img <ruta>`,
+  `/exit` (Ctrl+Q also quits). Voice rounds stay in the REPL/CLI for
+  now; the TUI gets its own voice UX later.
+- Headless-safe tests run through Textual's pilot (`tests/test_tui.py`).
 
 ### Images (Phase 3)
 

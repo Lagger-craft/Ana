@@ -544,8 +544,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version",
                         version=f"ana {__version__}")
-    parser.add_argument("command", nargs="?", choices=("init", "chat"),
-                        help="init: write starter config; chat: REPL (default)")
+    parser.add_argument("--tui", action="store_true",
+                        help="full-screen Textual interface (same as "
+                             "`ana tui`)")
+    parser.add_argument("command", nargs="?",
+                        choices=("init", "chat", "tui"),
+                        help="init: write starter config; chat: REPL "
+                             "(default); tui: full-screen interface")
     parser.add_argument("--config", help="path to config.toml")
     parser.add_argument("--provider", help="provider name from the config")
     parser.add_argument("--model", help="model id override")
@@ -609,6 +614,18 @@ def main(argv: list[str] | None = None) -> int:
             except (ProviderError, ConfigError, AgentError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
+            return 0
+
+        if args.tui or args.command == "tui":
+            from .tui import run_tui
+
+            run_tui(
+                cfg_path,
+                model_override=args.model,
+                provider_override=args.provider,
+                tools=not args.no_tools,
+                images=args.image or [],
+            )
             return 0
 
         history = run_repl(

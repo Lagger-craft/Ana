@@ -9,10 +9,15 @@ dependencies = ["httpx>=0.28"]
 ana = "ana.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-asyncio>=1", "textual>=0.86"]
 # Phase 2 voice (opt-in, local-only). Bounds kept permissive; see README
 # "Voice (Phase 2)". Not installed by default — install with: pip install -e '.[voice]'
 voice = ["faster-whisper>=1.0", "piper-tts"]
+# Phase 4 TUI (opt-in). install with: pip install -e '.[tui]'
+tui = ["textual>=0.86"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["setuptools>=68"]
