@@ -19,19 +19,18 @@ import os
 import pathlib
 import sys
 
-from .waifu import (parse_event, resolve_asset, WaifuState)
+from .waifu import (choose_monitor, DEFAULT_AVOID_MONITOR, parse_event,
+                    resolve_asset, WaifuState, waifu_dir)
 
 def _placeholder(name: str) -> bytes:
     """A plain rounded rect with the state name, so tests without art
     still show something stable."""
-    import base64
-
     color = {"idle": "#6c71c4", "talk": "#b58900"}.get(name, "#586e75")
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220">
 <rect x="10" y="10" width="200" height="200" rx="24" fill="{color}" stroke="#073642" stroke-width="4"/>
-<text x="110" y="120" font-size="28" fill="#fdf6e3" text-anchor="middle"
+<text x="110" y="125" font-size="30" fill="#fdf6e3" text-anchor="middle"
  font-family="sans-serif">{name}</text></svg>'''
-    return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}".encode()
+    return svg.encode("utf-8")  # raw SVG bytes: the file must BE the svg
 
 
 def read_events_forever(apply=None, stream=None):
@@ -75,6 +74,31 @@ def _dbg(fmt: str, *args) -> None:
                      + (fmt % args if args else fmt) + "\n")
     except OSError:
         pass
+
+
+def _choose_gdk_monitor(shell):
+    """Gdk.Monitor for the waifu, or None (no monitor choice possible)."""
+    try:
+        from gi.repository import Gdk
+
+        display = Gdk.Display.get_default()
+        monitor_list = display.get_monitors()
+        names = []
+        for i in range(monitor_list.get_n_items()):
+            monitor = monitor_list.get_item(i)
+            names.append(monitor.get_connector())
+        preferred = os.environ.get("ANA_WAIFU_MONITOR", "").strip() or None
+        avoid = (os.environ.get("ANA_WAIFU_AVOID", "").strip()
+                 or DEFAULT_AVOID_MONITOR)
+        picked = choose_monitor(names, preferred, avoid)
+        for i in range(monitor_list.get_n_items()):
+            monitor = monitor_list.get_item(i)
+            if monitor.get_connector() == picked:
+                _dbg("waifu monitor: %s (avoid=%s)", picked, avoid)
+                return monitor
+    except Exception as exc:  # wayland/compositor quirks stay cosmetic
+        _dbg("monitor pick failed: %s", exc)
+    return None
 
 
 def _reexec_system_python() -> "NoReturn":
@@ -125,6 +149,12 @@ def run_overlay() -> int:
     window.set_decorated(False)
     # layer-shell init must happen before the window maps
     Gtk4LayerShell.init_for_window(window)
+
+    # monitor choice: never on the user's gaming output (DP-1 by
+    # default; $ANA_WAIFU_MONITOR pins, $ANA_WAIFU_AVOID changes the rule)
+    picked = _choose_gdk_monitor(Gtk4LayerShell)
+    if picked is not None:
+        Gtk4LayerShell.set_monitor(window, picked)
     _dbg("init done; is_layer=%s supported=%s",
          Gtk4LayerShell.is_layer_window(window),
          Gtk4LayerShell.is_supported())
@@ -171,6 +201,16 @@ def run_overlay() -> int:
 
     _dbg("window size after full setup: %s x %s",
          window.get_width(), window.get_height())
+    try:
+        from .waifu import fifo_path
+
+        fifo = fifo_path()
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        if not fifo.exists():
+            os.mkfifo(fifo)
+            _dbg("fifo created: %s", fifo)
+    except OSError as exc:  # fifos are optional niceties
+        _dbg("fifo create failed: %s", exc)
     # the STDIN reader runs in a daemon thread: blocking reads MUST NOT
     # sit on the GTK main loop or the window paints nothing (a:0 ghost
     # surface — the exact reason the first overlay was invisible)
@@ -181,8 +221,50 @@ def run_overlay() -> int:
         """Thread-safe apply: the widgets update on the GTK main loop."""
         GLib.idle_add(apply, state_name, text)
 
-    threading.Thread(target=read_events_forever,
-                     daemon=True, args=(map_apply,)).start()
+    def fifo_reader():
+        """FIFO loop (blocks only off the loop; reopens after EOF)."""
+        import time
+
+        from .waifu import fifo_path
+
+        path = fifo_path()
+        while True:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                _dbg("fifo missing; retrying", str(path))
+                time.sleep(1.0)
+                continue
+            buf = b""
+            while True:
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    time.sleep(0.05)
+                    continue
+                except OSError:
+                    break
+                if not chunk:   # writer closed; wait for the next
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", "replace").strip()
+                    if text:
+                        state_name, subtitle = parse_event(text)
+                        if state_name == "quit":
+                            GLib.idle_add(window.destroy)
+                            return
+                        if state_name is not None:
+                            map_apply(state_name, subtitle)
+                        elif subtitle is not None:
+                            map_apply("", subtitle)
+            os.close(fd)
+            time.sleep(0.5)   # reopen for the next producing session
+
+    threading.Thread(target=fifo_reader, daemon=True).start()
+    _dbg("fifo reader started; presenting")
+    window.present()
     _loop = GLib.MainLoop()
     _loop.run()
     if state_id == WaifuState.IDLE:

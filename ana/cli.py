@@ -618,9 +618,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "waifu":
-            from .overlay import main as overlay_main
+            from .overlay import main as overlay_main, run_overlay
 
-            return overlay_main()
+            return run_overlay()
 
         if args.tui or args.command == "tui":
             from .tui import run_tui

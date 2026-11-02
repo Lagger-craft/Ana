@@ -93,3 +93,46 @@ def parse_event(line: str) -> "tuple[str | None, str | None]":
 def fifo_path() -> Path:
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     return Path(xdg_runtime) / "ana" / "waifu.fifo"
+
+
+DEFAULT_AVOID_MONITOR = "DP-1"   # the user's gaming/video output
+
+
+def choose_monitor(names, preferred: str | None, avoid: str) -> str:
+    """Monitor connector for the waifu, pure so the desktop smoke stays out.
+
+    An explicitly named connector wins (even if it would 'break' the
+    avoid rule — the user knows their own screens). Default behavior:
+    the first connector that is NOT the avoid one (the user plays on
+    DP-1 and wants the waifu OUT of there).
+    """
+    if preferred and preferred in names:
+        return preferred
+    others = [n for n in names if n != avoid]
+    return others[0] if others else (names[0] if names else avoid)
+
+
+def waifu_send(event: dict) -> None:
+    """Send one JSON event to the running overlay (if any); never raises.
+
+    The FIFO is created by `ana waifu`; the producers open it
+    non-blocking so a missing overlay is a silent nicety.
+    """
+    import errno
+
+    path = fifo_path()
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return  # nobody listening (overlay not running)
+    try:
+        os.write(fd, (json.dumps(event) + "\n").encode())
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            pass  # reader not ready: the nicety is a nicety
+    finally:
+        os.close(fd)
+
+
+def _waifu_fifo_exists() -> bool:
+    return fifo_path().exists()

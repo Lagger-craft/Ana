@@ -437,6 +437,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         `stream` and it costs the same path as the CLI.
         """
         from .cli import _do_turn, _switchable
+        from .waifu import waifu_send
 
         def work() -> None:
             _dbg("turn starts: %r", line)
@@ -453,10 +454,17 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                     self.emit_threaded, current_stream, self.tools_on,
                     self.registry, self.client_fx, self.max_rounds,
                     images=images)
+                reply = (self.history[-1]["content"]
+                         if (self.history
+                             and self.history[-1]["role"] == "assistant")
+                         else "")
+                if reply:
+                    waifu_send({"type": "say", "text": reply})
                 if (self.voice_on and state in ("ok", "tools-unavailable")
-                        and self.history
-                        and self.history[-1]["role"] == "assistant"):
-                    self.voice_fx_speak(self.history[-1]["content"])
+                        and reply):
+                    waifu_send({"type": "state", "state": "talk"})
+                    self.voice_fx_speak(reply)
+                    waifu_send({"type": "state", "state": "idle"})
             except Exception as exc:  # _do_turn notes expected errors
                 _dbg("turn raised: %s: %s", type(exc).__name__, exc)
                 self.emit_threaded(f"error: {exc}")
