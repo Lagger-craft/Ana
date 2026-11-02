@@ -35,6 +35,28 @@ class TestTuiApp:
         assert app.history[-1]["content"] == "hola mundo"
 
     @pytest.mark.asyncio
+    async def test_tui_reply_renders_in_the_chat_widget(self, cfg):
+        """The renderer must show the reply — a regression (RichLog.write
+        with a removed kwarg, then per-chunk line splitting) drew broken
+        screens while the transcript looked fine; assert on the real
+        widget surface."""
+        from textual.widgets import Static
+
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False, stream=lambda msgs, model,
+                     system=None: iter(["hola ", "mundo"]))
+        async with app.run_test() as pilot:
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            for _ in range(15):
+                await pilot.pause()
+            items = "\n".join(
+                str(st.content) for st in app.query("#chat Static"))
+            assert "hola mundo" in items   # the streaming reply, IN one piece
+            assert "you> hi" in items      # and the user turn
+
+    @pytest.mark.asyncio
     async def test_tui_new_clears_history_and_transcript(self, cfg):
         from ana.tui import AnaApp
 

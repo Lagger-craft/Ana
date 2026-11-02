@@ -10,15 +10,33 @@ object backend with an actionable run_tui error.
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import time
 
 ANA_TUI_MISSING_MSG = (
     "textual not installed — run: .venv/bin/pip install -e '.[tui]'")
 
+ANA_TUI_DEBUG = os.environ.get("ANA_TUI_DEBUG", "").strip()
+
+
+def _dbg(fmt: str, *args) -> None:
+    """Opt-in trace to $ANA_TUI_DEBUG (a file path) for TUI debugging."""
+    if not ANA_TUI_DEBUG:
+        return
+    try:
+        with open(ANA_TUI_DEBUG, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} "
+                    f"t{threading.get_ident():<10} "
+                    + (fmt % args if args else fmt) + "\n")
+    except OSError:
+        pass
+
 try:  # the `tui` extra; AnaApp stays importable without it
     from textual.app import App, ComposeResult
-    from textual.containers import Vertical
-    from textual.widgets import Input, RichLog, Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Input, Static
 
     _TEXTUAL_INSTALLED = True
 except ImportError:  # tui extra optional — plain chat still works
@@ -50,6 +68,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         CSS = """
         #status { height: 1; background: $boost; color: $text; padding: 0 1; }
         #chat { border: none; }
+        #chat > Static { padding: 0 1; }
         Input { border: none; background: $surface; }
         """
 
@@ -75,7 +94,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
 
     def compose(self):
         yield Static(id="status")
-        yield RichLog(id="chat", markup=False, wrap=True)
+        yield VerticalScroll(id="chat")
         yield Input(id="entry")
 
     def on_mount(self):
@@ -116,21 +135,48 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
 
     def _note(self, text: str) -> None:
         self.transcript += ("" if not self.transcript else "\n") + text
-        if hasattr(self, "is_running") and self.is_running and _TEXTUAL_INSTALLED:
-            chat = self.query_one("#chat")
-            chat.write(text)
-            chat.scroll_end(animate=False)
+        self._mount_item(text)
 
     def _append(self, chunk: str) -> None:
+        """Streaming chunk: append to the CURRENT reply item.
+
+        One Static per turn updates in place — RichLog.write() rendered
+        each chunk as its own line in Textual 8, splitting the reply.
+        """
         self.transcript += chunk
-        if self.is_running and _TEXTUAL_INSTALLED:
-            chat = self.query_one("#chat")
-            chat.write(chunk, no_wrap=False)
-            chat.scroll_end(animate=False)
+        self._stream_buf = getattr(self, "_stream_buf", "") + chunk
+        self._render_reply()
+
+    def _render_reply(self) -> None:
+        if not (self.is_running and _TEXTUAL_INSTALLED):
+            return
+        chat = self.query_one("#chat")
+        widget = getattr(self, "_stream_widget", None)
+        buf = getattr(self, "_stream_buf", "")
+        if widget is None:
+            self._stream_widget = Static(buf)
+            chat.mount(self._stream_widget)
+            widget = self._stream_widget
+        else:
+            widget.update(buf)
+        chat.scroll_end(animate=False)
+
+    def _mount_item(self, text: str):
+        """A non-streaming line (user turn, command echo, error)."""
+        if not (self.is_running and _TEXTUAL_INSTALLED):
+            return None
+        chat = self.query_one("#chat")
+        widget = Static(text)
+        chat.mount(widget)
+        self._stream_widget = None  # replies restart after a plain line
+        self._stream_buf = ""
+        chat.scroll_end(animate=False)
+        return widget
 
     # ---- input --------------------------------------------------------
 
     def on_input_submitted(self, event) -> None:
+        _dbg("submitted: %r", event.value)
         self.submit(event.value)
 
     # Textual 8 headless routing: the naming-convention handler needs a
@@ -215,6 +261,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         from .cli import _do_turn, _switchable
 
         def work() -> None:
+            _dbg("turn starts: %r", line)
             images = list(self.pending_images)
             self.pending_images.clear()
             current_stream = None
@@ -229,22 +276,31 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                     self.registry, self.client_fx, self.max_rounds,
                     images=images)
             except Exception as exc:  # _do_turn notes expected errors
+                _dbg("turn raised: %s: %s", type(exc).__name__, exc)
                 self.emit_threaded(f"error: {exc}")
             finally:
+                _dbg("turn done")
                 try:
                     self.call_from_thread(self._finish_turn, line)
                 except Exception:  # app is closing; nothing to update
                     pass
+                _dbg("finish scheduled")
 
         self.run_worker(work, thread=True, exclusive=True, name="ana-turn")
 
     def emit_threaded(self, text: str) -> None:
         """Called from the worker thread; safe to schedule on the event loop."""
+        _dbg("emit chunk: %r", text)
         try:
             self.call_from_thread(self._append, text)
-        except Exception:  # app closed mid-stream; nothing to update
-            pass
+        except Exception as exc:  # app closed mid-stream or a widget bug
+            # diagnostics only: silent swallowing HID real bugs (the
+            # RichLog.write regression) — never stay silent without a log.
+            _dbg("emit failed: %s: %s", type(exc).__name__, exc)
 
     def _finish_turn(self, line: str) -> None:
+        _dbg("finish runs on loop")
         self.busy = False
+        self._stream_widget = None
+        self._stream_buf = ""
         self._refresh_status()
