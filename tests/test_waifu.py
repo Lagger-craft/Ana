@@ -126,3 +126,53 @@ class TestFifoSend:
 
         monkeypatch.setattr("ana.waifu.fifo_path", lambda: tmp_path / "no.fifo")
         waifu_send({"type": "state", "state": "talk"})  # no crash, no error
+
+
+# -------------------------------- corte 3: blink/fade/tamaño (T32)
+
+
+class TestEnvTuning:
+    def test_blink_params_defaults(self, monkeypatch):
+        from ana.waifu import blink_params
+
+        monkeypatch.delenv("ANA_WAIFU_BLINK", raising=False)
+        interval_ms, duration_ms = blink_params()
+        assert 1000 < interval_ms <= 8000   # something human
+        assert 60 <= duration_ms <= 500
+
+    def test_blink_params_parse_interval_duration(self, monkeypatch):
+        from ana.waifu import blink_params
+
+        monkeypatch.setenv("ANA_WAIFU_BLINK", "2:80")
+        assert blink_params() == (2000.0, 80)
+
+    def test_blink_params_bad_input_uses_defaults(self, monkeypatch):
+        from ana.waifu import blink_params
+
+        monkeypatch.setenv("ANA_WAIFU_BLINK", "jazz")
+        interval_ms, duration_ms = blink_params()
+        assert 1000 < interval_ms <= 8000 and 60 <= duration_ms <= 500
+
+    def test_avatar_size_env(self, monkeypatch):
+        from ana.waifu import avatar_size
+
+        monkeypatch.setenv("ANA_WAIFU_SIZE", "400")
+        assert avatar_size() == 400
+        monkeypatch.setenv("ANA_WAIFU_SIZE", " letters")
+        assert avatar_size() == 220
+        monkeypatch.delenv("ANA_WAIFU_SIZE", raising=False)
+        assert avatar_size() == 220
+
+
+class TestFadeSteps:
+    def test_fade_is_a_monotonic_ramp(self):
+        from ana.waifu import fade_steps
+
+        r = fade_steps(steps=10)
+        assert r[0] == 0.0 and abs(r[-1] - 1.0) < 1e-6
+        assert all(b > a for a, b in zip(r, r[1:]))
+
+    def test_fade_steps_count(self):
+        from ana.waifu import fade_steps
+
+        assert len(fade_steps(steps=3)) == 3

@@ -112,6 +112,42 @@ def choose_monitor(names, preferred: str | None, avoid: str) -> str:
     return others[0] if others else (names[0] if names else avoid)
 
 
+def blink_params() -> "tuple[int, int]":
+    """Blink cadence in MILLISECONDS: (interval_ms, duration_ms).
+
+    $ANA_WAIFU_BLINK accepts "interval_seconds:duration_ms" (e.g. "2:80").
+    Defaults: (4000, 150) with random jitter added by the runtime.
+    """
+    raw = os.environ.get("ANA_WAIFU_BLINK", "").strip()
+    try:
+        parts = raw.split(":")
+        interval_ms = int(float(parts[0]) * 1000)
+        duration_ms = int(parts[1]) if len(parts) > 1 else 150
+        if 0 < interval_ms <= 30000 and 0 < duration_ms <= 2000:
+            return interval_ms, duration_ms
+    except (ValueError, IndexError):
+        pass
+    return 4000, 150
+
+
+def avatar_size() -> int:
+    """Avatar edge in px: $ANA_WAIFU_SIZE or 220."""
+    try:
+        v = int(os.environ.get("ANA_WAIFU_SIZE", "").strip())
+        if 40 <= v <= 2000:
+            return v
+    except ValueError:
+        pass
+    return 220
+
+
+def fade_steps(steps: int = 10) -> list[float]:
+    """Monotonic opacity ramp 0→1 for the fade-in."""
+    if steps <= 1:
+        return [1.0]
+    return [round(i / (steps - 1), 4) for i in range(steps)]
+
+
 def waifu_send(event: dict) -> None:
     """Send one JSON event to the running overlay (if any); never raises.
 

@@ -19,7 +19,8 @@ import os
 import pathlib
 import sys
 
-from .waifu import (choose_monitor, DEFAULT_AVOID_MONITOR, parse_event,
+from .waifu import (avatar_size, blink_params, choose_monitor,
+                    DEFAULT_AVOID_MONITOR, fade_steps, parse_event,
                     resolve_asset, WaifuState, waifu_dir)
 
 def _placeholder(name: str) -> bytes:
@@ -169,13 +170,25 @@ def run_overlay() -> int:
 
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     avatar = Gtk.Image()
-    avatar.set_pixel_size(220)
+    avatar.set_pixel_size(avatar_size())
     subtitle = Gtk.Label(label="Ana 👋 · /say on the way")
     subtitle.set_wrap(True)
     subtitle.set_max_width_chars(46)
     box.append(avatar)
     box.append(subtitle)
     window.set_child(box)
+
+    # fade-in: layer surfaces appear abruptly; a gentle ramp reads nicer
+    window.set_opacity(0.0)
+    ramp = fade_steps(steps=8)
+    for i, opacity in enumerate(ramp):
+        _loop_no = i * 40
+
+        def _set(v=opacity):
+            window.set_opacity(v)
+            return False
+
+        GLib.timeout_add(_loop_no, _set)
 
     placeholders: dict[str, str] = {}
 
@@ -261,6 +274,41 @@ def run_overlay() -> int:
                             map_apply("", subtitle)
             os.close(fd)
             time.sleep(0.5)   # reopen for the next producing session
+
+    # blink: pure overlay-side life; blink.png optional (fallback: idle)
+    interval_ms, blink_ms = blink_params()
+    import random as _random
+
+    def _blink_and_schedule():
+        blink = resolve_asset("blink")
+        fallback = resolve_asset("idle")
+        shown = str(blink) if blink is not None else (
+            str(fallback) if fallback is not None
+            else placeholder_file("idle"))
+        avatar.set_from_file(shown)
+
+        def _back():
+            state_now = str(resolve_asset(state_holder[0]) or "")
+            if state_now:
+                avatar.set_from_file(state_now)
+            else:
+                avatar.set_from_file(placeholder_file(state_holder[0]))
+            return False
+
+        GLib.timeout_add(blink_ms, _back)
+        return bool(_random.random() > 0.05)
+
+    state_holder = [WaifuState.IDLE.value]
+
+    def _tick():
+        if _blink_and_schedule():
+            interval_ms2 = interval_ms
+        else:
+            interval_ms2 = 200
+        GLib.timeout_add(interval_ms2, _tick)
+        return False
+
+    GLib.timeout_add(interval_ms, _tick)
 
     threading.Thread(target=fifo_reader, daemon=True).start()
     _dbg("fifo reader started; presenting")
