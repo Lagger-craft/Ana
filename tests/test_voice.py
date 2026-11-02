@@ -37,6 +37,59 @@ class TestCliSttFlag:
         assert seen["voice"] is True
 
 
+class TestMediaPauseAroundRecording:
+    """_DefaultVoice.record pauses MPRIS players while capturing.
+
+    Playing media dominates the mic feed and gets transcribed instead
+    of the user (voxtype already does this: pause_media = true).
+    """
+
+    def _patch_voice(self, monkeypatch, fail=False):
+        import ana.cli as cli
+        import ana.voice.media as media_mod
+        import ana.voice.stt as stt_mod
+
+        events = []
+
+        def fake_pause():
+            events.append("pause")
+            return ["org.mpris.MediaPlayer2.firefox"]
+
+        def fake_resume(players):
+            events.append(("resume", tuple(players)))
+
+        def fake_record(path, max_seconds=None, press=None):
+            events.append("record")
+            if fail:
+                raise VoiceError("boom")
+            return path
+
+        monkeypatch.setattr(media_mod, "pause_media", fake_pause)
+        monkeypatch.setattr(media_mod, "resume_media", fake_resume)
+        monkeypatch.setattr(stt_mod, "record_to_wav", fake_record)
+        voice = cli._DefaultVoice()
+        return voice, events
+
+    def test_pause_record_resume_order(self, monkeypatch):
+        voice, events = self._patch_voice(monkeypatch)
+        voice.record(5.0, press=lambda timeout=None: True)
+        assert events == ["pause", "record",
+                          ("resume", ("org.mpris.MediaPlayer2.firefox",))]
+
+    def test_resume_even_when_recording_fails(self, monkeypatch):
+        voice, events = self._patch_voice(monkeypatch, fail=True)
+        with pytest.raises(VoiceError):
+            voice.record(5.0, press=lambda timeout=None: True)
+        assert events == ["pause", "record",
+                          ("resume", ("org.mpris.MediaPlayer2.firefox",))]
+
+    def test_opt_out_env_skips_pause(self, monkeypatch):
+        monkeypatch.setenv("ANA_VOICE_PAUSE_MEDIA", "0")
+        voice, events = self._patch_voice(monkeypatch)
+        voice.record(5.0, press=lambda timeout=None: True)
+        assert events == ["record"]
+
+
 class _Proc:
     """Minimal CompletedProcess stand-in for the voxtype _run seam."""
 

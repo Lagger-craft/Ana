@@ -161,6 +161,10 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
   `(no escuché nada)` and returns to the prompt.
 - The max recording time comes from `ANA_VOICE_MAX_SECONDS` (seconds,
   default `12`).
+- **Media pause** (voxtype parity): while Ana records, MPRIS players
+  (browser videos, etc.) are paused — playing media otherwise dominates
+  the mic feed and gets transcribed instead of you. Paused players
+  resume when the recording stops. `ANA_VOICE_PAUSE_MEDIA=0` opts out.
 - **Typed input** still works while voice is on — the reply is spoken
   too. `/voice off` stops the playback and the push-to-talk rounds.
 - If a dependency or device is missing (no `voxtype`, no `piper`,

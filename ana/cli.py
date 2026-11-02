@@ -260,17 +260,26 @@ class _DefaultVoice:
         import tempfile
         from pathlib import Path
 
+        from .voice.media import pause_media, resume_media
         from .voice.stt import record_to_wav
 
         fd, name = tempfile.mkstemp(prefix="ana-rec-", suffix=".wav")
         os.close(fd)
         os.unlink(name)  # arecord creates the file; avoid a stale empty one
         path = Path(name)
+        # voxtype-parity: playing media (browser videos, games) dominates
+        # the mic feed; pause MPRIS players for the capture and resume
+        # them after, even on error. ANA_VOICE_PAUSE_MEDIA=0 opts out.
+        paused = (os.environ.get("ANA_VOICE_PAUSE_MEDIA", "1") != "0"
+                  and pause_media())
         try:
             return record_to_wav(path, max_seconds=max_seconds, press=press)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
+        finally:
+            if paused:
+                resume_media(paused)
 
     def transcribe(self, wav):
         from pathlib import Path
