@@ -102,6 +102,9 @@ def _current_time(args: dict) -> str:
     the default is the machine's local zone.
     """
     name = str(args.get("timezone", "")).strip()
+    override = os.environ.get("ANA_TIMEZONE", "").strip()
+    if not name and override:
+        name = override
     now = datetime.now(_timezone.utc).astimezone(
         ZoneInfo(name) if name else None)
     return (now.isoformat(timespec="seconds") + "\n"

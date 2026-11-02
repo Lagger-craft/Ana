@@ -6,6 +6,7 @@ in one place. The transcript attribute is the deterministic surface for
 assertions (widgets may reflow differently between versions).
 """
 
+import time
 import pytest
 
 from ana.config import write_template
@@ -287,3 +288,102 @@ class TestTuiPolish:
                 "#chat > .reply")[0]
             assert "you>" in str(you.content)
             assert "hola!" in str(reply.content)
+
+
+# ------------------------------------------- ↑/↓ historial (T29)
+
+
+class TestEntryHistory:
+    @pytest.mark.asyncio
+    async def test_up_recalls_the_last_message(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False,
+                     stream=lambda *a, **k: iter(["ok"]))
+        async with app.run_test() as pilot:
+            await pilot.press("h", "o", "l", "a", "enter")
+            for _ in range(8):
+                await pilot.pause()
+            await pilot.press("up")
+            await pilot.pause()
+            assert app.query_one("#entry").value == "hola"
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.query_one("#entry").value == ""
+
+    @pytest.mark.asyncio
+    async def test_down_after_two_recalls_in_order(self, cfg):
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False, stream=lambda *a, **k: iter(["ok"]))
+        async with app.run_test() as pilot:
+            await pilot.press("p", "r", "i", "m", "e", "r", "o", "enter")
+            await pilot.press("s", "e", "g", "u", "n", "d", "o", "enter")
+            for _ in range(10):
+                await pilot.pause()
+            await pilot.press("up")   # segundo
+            await pilot.press("up")   # primero
+            await pilot.press("down") # vuelve al segundo
+            await pilot.pause()
+            assert app.query_one("#entry").value == "segundo"
+
+    @pytest.mark.asyncio
+    async def test_commands_and_turns_both_count(self, cfg):
+        # commands Pparte of the same history: recall repeats both
+        from ana.tui import AnaApp
+
+        app = AnaApp(cfg, tools=False, stream=lambda *a, **k: iter(["ok"]))
+        async with app.run_test() as pilot:
+            await pilot.press("/", "m", "o", "d", "e", "l", "enter")
+            await pilot.press("h", "o", "l", "a", "enter")
+            for _ in range(10):
+                await pilot.pause()
+            await pilot.press("up")
+            await pilot.pause()
+            assert app.query_one("#entry").value == "hola"
+            await pilot.press("up")
+            await pilot.pause()
+            assert app.query_one("#entry").value == "/model"
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.query_one("#entry").value == "hola"
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.query_one("#entry").value == ""
+
+
+# --------------------------------- indicador de actividad (T29 extra)
+
+
+class TestBusyIndicator:
+    @pytest.mark.asyncio
+    async def test_status_shows_pensando_during_stream(self, cfg):
+        import asyncio as aio
+
+        from textual.widgets import Static
+
+        from ana.tui import AnaApp
+
+        def slow(msgs, model, system=None):
+            yield "pr"
+            time.sleep(1)  # turn engine is SYNC: windows reopen afterwards
+            yield "ristino"
+
+        app = AnaApp(cfg, tools=False, stream=slow)
+        async with app.run_test() as pilot:
+            await pilot.press("a", "enter")
+            flag = ""
+            for _ in range(60):          # poll instead of racing pauses
+                await pilot.pause()
+                flag = str(app.query_one("#status").content)
+                if "respondiendo" in flag:
+                    break
+            assert "respondiendo" in flag  # work visible mid-turn
+            cleared = False
+            for _ in range(90):
+                await pilot.pause()
+                flag = str(app.query_one("#status").content)
+                if "respondiendo" not in flag:
+                    cleared = True
+                    break
+            assert cleared                # flag cleared when the turn ends

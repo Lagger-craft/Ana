@@ -143,3 +143,17 @@ class TestCurrentTime:
         monkeypatch.setenv("TZ", "UTC")
         out = tools.call("current_time", {"timezone": "Europe/Madrid"})
         assert "T" in out
+
+
+class TestTimezoneDefault:
+    def test_ana_timezone_env_overrides_the_system_zone(self, monkeypatch,
+                                                         tools):
+        monkeypatch.setenv("ANA_TIMEZONE", "Pacific/Apia")
+        out = tools.call("current_time", {})
+        assert "+13" in out.splitlines()[0]  # UTC+13, unambiguous
+
+    def test_without_env_uses_the_machine_zone(self, monkeypatch, tools):
+        monkeypatch.delenv("ANA_TIMEZONE", raising=False)
+        out = tools.call("current_time", {})
+        first = out.splitlines()[0]
+        assert "T" in first       # ISO line stays machine-readable

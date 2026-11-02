@@ -96,6 +96,45 @@ def import_textual():
         raise SystemExit(1)
 
 
+class ChatInput(Input if _TEXTUAL_INSTALLED else object):
+
+    _ana_hist: list = []     # shared by the app (same list object)
+    _hist_pos: int | None = None
+
+    def __init__(self, **kwargs):
+        history = kwargs.pop("history", None)  # test convenience only
+        super().__init__(**kwargs)
+        self._ana_hist = history or []
+        self._hist_pos = len(self._ana_hist)
+    """Input with an entry history: ArrowUp recalls, ArrowDown returns.
+
+    Textual's Input does not keep a history; commands and chat turns land
+    in the same list so recall repeats both (/model, requests...).
+    """
+
+    if _TEXTUAL_INSTALLED:
+        BINDINGS = [
+            ("up", "history_prev", "prev"),
+            ("down", "history_next", "next"),
+        ]
+
+        def action_history_prev(self) -> None:
+            self._hist_step(-1)
+
+        def action_history_next(self) -> None:
+            self._hist_step(+1)
+
+        def _hist_step(self, step: int) -> None:
+            history = self._ana_hist or []
+            if not history:
+                return
+            pos = (self._hist_pos if self._hist_pos is not None
+                   else len(history)) + step
+            pos = max(0, min(pos, len(history)))
+            self._hist_pos = pos
+            self.value = "" if pos == len(history) else history[pos]
+
+
 def run_tui(cfg_path, model_override=None, provider_override=None,
             tools=True, images=None):
     """Entry point for `ana tui` / `ana --tui`."""
@@ -137,10 +176,12 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         self.history: list[dict] = []
         self.pending_images: list[str] = list(images or [])
         self.transcript = ""
+
+        self.voice_fx = None   # injected seam (tests) or the live default
         self.voice_on = voice
         self.stt = stt
-        self.voice_fx = None   # injected seam (tests) or the live default
         self._press_gate = None      # push-to-talk gate (None = not recording)
+        self._entry_history: list[str] = []
         self.busy = True  # until the first mount finishes loading
 
     # ---- widgets ------------------------------------------------------
@@ -148,7 +189,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
     def compose(self):
         yield Static(id="status")
         yield VerticalScroll(id="chat")
-        yield Input(id="entry")
+        yield ChatInput(id="entry")
 
     def on_mount(self):
         try:
@@ -163,16 +204,19 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
             self._note(f"error: {exc}")
         self.busy = False
         self._refresh_status()
+        entry = self.query_one("#entry")
+        entry._ana_hist = self._entry_history  # live: the same list object
+        entry._hist_pos = len(self._entry_history)
         if not self.history and getattr(self.cfg, "providers", None):
             self._note(ANA_TUI_WELCOME)
-        if self.query_one("#entry"):
-            self.query_one("#entry").focus()
+        if entry:
+            entry.focus()
 
     def _set_status(self, text: str) -> None:
         if self.is_running and _TEXTUAL_INSTALLED:
             self.query_one("#status").update(text)
 
-    def _refresh_status(self):
+    def _refresh_status(self, working: str = "") -> None:
         if not hasattr(self, "cfg") or self.cfg is None:
             self._set_status("ana: config not loaded")
             return
@@ -181,11 +225,14 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         provider = self.provider_override or self.cfg.default_provider
         model = self.model_override or _default_model(self.cfg, provider,
                                                       None)
+        tail = f" · {working}" if working else ""
+        _dbg("refresh_status working=%r", working)
+
         self._set_status(
             f"model: {model} · provider: {provider} · "
             f"tools: {'on' if self.tools_on else 'off'} · "
             f"imgs: {len(self.pending_images)} · "
-            f"voice: {'on' if self.voice_on else 'off'}")
+            f"voice: {'on' if self.voice_on else 'off'}" + tail)
 
     # ---- transcript ---------------------------------------------------
 
@@ -251,6 +298,9 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
             if self.voice_on:
                 self._voice_gate_press()
             return
+        self._entry_history.append(text)
+        entry = self.query_one("#entry")
+        entry._hist_pos = len(self._entry_history)  # stay at the free end
         self._mount_item(f"you> {text}", "you")
         self.transcript += ("" if not self.transcript else "\n")             + f"you> {text}"
         if text.startswith("/"):
@@ -379,6 +429,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
 
     def _run_turn(self, line: str) -> None:
         self.busy = True
+        self._refresh_status(working="⏳ respondiendo")
         self._turn_worker(line)
 
     def _turn_worker(self, line: str) -> None:
