@@ -10,6 +10,9 @@ ana = "ana.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Phase 2 voice (opt-in, local-only). Bounds kept permissive; see README
+# "Voice (Phase 2)". Not installed by default — install with: pip install -e '.[voice]'
+voice = ["faster-whisper>=1.0", "piper-tts"]
 
 [build-system]
 requires = ["setuptools>=68"]

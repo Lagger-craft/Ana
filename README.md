@@ -11,7 +11,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
 | **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
-| 2 | voice loop: faster-whisper STT + Piper TTS |
+| **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, opt-in) |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
 | 4 | waifu avatar overlay (layer-shell), emotion tags |
 | 5 | Inochi2D rigging via an MCP-driven Inochi Creator (PNG fallback if the spike fails) |
@@ -64,7 +64,7 @@ To let Ana search the web, also export `TAVILY_API_KEY`
 ```
 
 REPL commands: `/exit`, `/new` (clear history), `/model [name]`,
-`/provider [name]`, `/tools [on|off|list]`.
+`/provider [name]`, `/tools [on|off|list]`, `/voice [on|off|status]`.
 
 If a provider rejects the tools payload (e.g. a small local model), Ana
 retries the turn without tools and keeps tools off for the session;
@@ -83,6 +83,74 @@ Example, fully local (no cloud involved):
 ollama serve &                   # if not already running
 .venv/bin/ana --provider ollama --no-tools -m "Say hello in three words"
 ```
+
+## Voice (Phase 2)
+
+Bidirectional voice, **fully local** (S9/S10): faster-whisper for
+speech-to-text, Piper for text-to-speech with a Spanish voice. Nothing is
+sent to the cloud — recording, transcription, synthesis and playback all
+happen on this machine. Voice is opt-in per session; plain text mode is
+unchanged.
+
+### Install
+
+```sh
+.venv/bin/pip install -e '.[voice]'    # adds faster-whisper>=1.0 + piper-tts
+```
+
+Version bounds are deliberately permissive: `faster-whisper>=1.0` and
+`piper-tts` unpinned — the packages are not installed in this environment
+yet (install was deferred), so bounds stay loose until a known-good pair
+is verified. The group is **not** installed by default.
+
+Besides the Python packages you need:
+
+- `arecord` for mic capture — `sudo pacman -S alsa-utils`
+  (the `pw-record` alternative from PipeWire is mentioned in the error)
+- `paplay` for playback (PipeWire/PulseAudio, default on Omarchy);
+  `aplay` is used as fallback
+- a Piper **Spanish** voice model (below)
+
+### Spanish voice model
+
+Resolution order: `$ANA_PIPER_MODEL`, else the first `es_*.onnx` found
+under `~/.local/share/piper/` (flat file or one folder per voice). If
+nothing is found, Ana tells you where to put one. Example (es_ES-carmen
+from the rhasspy/piper-voices collection):
+
+```sh
+mkdir -p ~/.local/share/piper/es_ES-carmen
+wget -O ~/.local/share/piper/es_ES-carmen/es_ES-carmen.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/es_ES/carmen/medium/es_ES-carmen.onnx
+wget -O ~/.local/share/piper/es_ES-carmen/es_ES-carmen.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/es_ES/carmen/medium/es_ES-carmen.onnx.json
+# or point at any model you already have:
+export ANA_PIPER_MODEL=/path/to/es_XXXX-voice.onnx
+```
+
+### Usage
+
+```sh
+.venv/bin/ana --provider ollama --voice   # start in voice mode
+```
+
+In the REPL, `/voice on|off|status` toggles voice for the session:
+
+- **Voice round**: with voice on, press Enter on the empty prompt to
+  record 5 s of audio, transcribe it locally, and run that text through
+  the normal tool-enabled turn. Ana then speaks the final reply with
+  Piper.
+- **Typed input** still works while voice is on — the reply is spoken
+  too. `/voice off` stops the playback and the Enter-to-talk rounds.
+- If a dependency or device is missing (no `faster-whisper`, no `piper`,
+  no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
+  running in text mode — the REPL never crashes on voice errors.
+
+### Privacy
+
+All local, no cloud STT/TTS: mic audio goes straight to faster-whisper
+(CPU, `small` model by default) and replies are synthesized by Piper on
+this machine. The recorded WAV is deleted right after transcription.
 
 ## Tests
 

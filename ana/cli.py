@@ -6,6 +6,7 @@ Commands inside the REPL:
 - ``/new``: start a new conversation (clears history)
 - ``/model [name]``: show or switch the model
 - ``/provider [name]``: show or switch the provider
+- ``/voice [on|off|status]``: toggle the opt-in voice loop (Phase 2)
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from .agent import AgentError, ToolRegistry, run_agent
 from .client import ProviderClient, ProviderError
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
 from .tools import build_default_tools
+from .voice import VoiceError
 
 StreamFn = Callable[..., Iterator[str]]
 
 COMMAND_HELP = (
-    "commands: /exit, /new, /model [name], /provider [name], /tools [on|off|list]")
+    "commands: /exit, /new, /model [name], /provider [name], "
+    "/tools [on|off|list], /voice [on|off|status]")
 
 
 def build_stream(cfg: Config, provider: Provider) -> StreamFn:
@@ -58,12 +61,23 @@ def run_repl(
     registry: ToolRegistry | None = None,
     client_fx: object | None = None,
     max_rounds: int = 4,
+    voice: bool = False,
+    voice_secs: float = 5.0,
+    voice_fx: object | None = None,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
 
     ``lines`` lets tests script input; ``stream`` lets tests supply a
     canned backend. Returns the conversation history (user + assistant
     messages) accumulated during the session.
+
+    ``voice`` starts the session in voice mode (S9): press Enter on the
+    empty prompt to record ``voice_secs`` seconds, transcribe locally,
+    and run the transcript through the normal turn — the final reply is
+    then spoken. ``voice_fx`` is the injectable seam with ``record`` /
+    ``transcribe`` / ``speak`` methods (tests use fakes; the default is
+    the live :class:`_DefaultVoice` backend). Voice errors degrade to
+    ``(voice unavailable: ...)`` without leaving the REPL.
     """
     cfg = load_config(cfg_path)
     emit = emit or (lambda text: print(text, flush=True))
@@ -77,6 +91,8 @@ def run_repl(
     stream_fn = stream
     tools_on = tools
     active_registry: ToolRegistry | None = registry
+    voice_on = voice
+    vfx = voice_fx if voice_fx is not None else _DefaultVoice()
 
     def current_stream() -> StreamFn:
         nonlocal stream_fn
@@ -99,7 +115,23 @@ def run_repl(
             break
 
         if not line:
-            continue
+            if not voice_on:
+                continue
+            # voice round (S9): press Enter to talk
+            try:
+                wav = vfx.record(voice_secs)
+                heard = (vfx.transcribe(wav) or "").strip()
+            except VoiceError as exc:
+                emit(f"(voice unavailable: {exc})")
+                continue
+            except KeyboardInterrupt:
+                emit("\n(record stopped)")
+                continue
+            if not heard:
+                emit("(heard nothing, try again)")
+                continue
+            emit(f"you> {heard}")
+            line = heard
 
         if line.startswith("/"):
             try:
@@ -149,6 +181,20 @@ def run_repl(
                     current = "on" if tools_on else "off"
                     emit(f"tools: {current} (usage: /tools [on|off|list])")
                 continue
+            elif cmd == "voice":
+                if arg == "on":
+                    voice_on = True
+                    emit("voice on")
+                elif arg == "off":
+                    voice_on = False
+                    emit("voice off")
+                elif arg == "status":
+                    emit(f"voice: {'on' if voice_on else 'off'}")
+                else:
+                    current = "on" if voice_on else "off"
+                    emit(f"voice: {current} "
+                         f"(usage: /voice [on|off|status])")
+                continue
             else:
                 emit(f"unknown command: /{cmd} ({COMMAND_HELP})")
                 continue
@@ -159,9 +205,56 @@ def run_repl(
                               active_registry, client_fx, max_rounds)
         if turn_state == "tools-unavailable":
             tools_on = False  # stay off for the rest of the session
+        if (voice_on and turn_state in ("ok", "tools-unavailable")
+                and history and history[-1]["role"] == "assistant"):
+            try:
+                vfx.speak(history[-1]["content"])
+            except VoiceError as exc:
+                emit(f"(voice unavailable: {exc})")
         emit("")
 
     return history
+
+
+class _DefaultVoice:
+    """Live voice backend: arecord → faster-whisper → Piper.
+
+    Imports the voice modules lazily so plain text sessions never touch
+    them. The recorded WAV is deleted as soon as transcription finishes
+    (or if recording fails), so mic audio does not linger on disk.
+    """
+
+    def record(self, seconds: float):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from .voice.stt import record_to_wav
+
+        fd, name = tempfile.mkstemp(prefix="ana-rec-", suffix=".wav")
+        os.close(fd)
+        os.unlink(name)  # arecord creates the file; avoid a stale empty one
+        path = Path(name)
+        try:
+            return record_to_wav(seconds, path)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    def transcribe(self, wav):
+        from pathlib import Path
+
+        from .voice.stt import WhisperSTT
+
+        try:
+            return WhisperSTT().transcribe(wav)
+        finally:
+            Path(wav).unlink(missing_ok=True)
+
+    def speak(self, text: str) -> None:
+        from .voice.tts import PiperTTS
+
+        PiperTTS().speak(text)
 
 
 def _do_turn(cfg, provider, models, model, history, line, emit,
@@ -275,6 +368,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="one-shot prompt; print and exit")
     parser.add_argument("--no-tools", action="store_true",
                         help="disable tool calling for this session")
+    parser.add_argument("--voice", action="store_true",
+                        help="voice mode: press Enter to talk "
+                             "(local STT; replies are spoken via Piper)")
 
     args = parser.parse_args(argv)
 
@@ -324,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
             model_override=args.model,
             provider_override=args.provider,
             tools=not args.no_tools,
+            voice=args.voice,
         )
         return 0
     except ConfigError as exc:
