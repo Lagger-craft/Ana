@@ -86,17 +86,33 @@ ollama serve &                   # if not already running
 
 ## Voice (Phase 2)
 
-Bidirectional voice, **fully local** (S9/S10): faster-whisper for
+Bidirectional voice, **fully local** (S9/S10): voxtype for
 speech-to-text, Piper for text-to-speech with a Spanish voice. Nothing is
 sent to the cloud — recording, transcription, synthesis and playback all
 happen on this machine. Voice is opt-in per session; plain text mode is
 unchanged.
+
+### Speech-to-text backend
+
+Default **voxtype** (S11): Ana records push-to-talk, then hands the WAV to
+the locally installed `voxtype transcribe` CLI — the same engine you
+dictate with (`voxtype.io`, AUR `voxtype` / Omarchy AI → Dictation).
+Alternative: faster-whisper (`ANA_STT=whisper`, or `--stt whisper`).
+
+- `--stt voxtype|whisper` selects per run; `$ANA_STT` does it per shell.
+- `$ANA_MIC_DEVICE` pins the capture source instead of the default
+  (arecord `-D`). Useful if the default source is not your microphone —
+  e.g. a speaker monitor feed that records everything but speech
+  (whisper then hallucinates silence subtitles).
 
 ### Install
 
 ```sh
 .venv/bin/pip install -e '.[voice]'    # adds faster-whisper>=1.0 + piper-tts
 ```
+
+With the default voxtype backend, the `faster-whisper` extra is optional
+(you still need `piper-tts` for replies).
 
 Version bounds are deliberately permissive: `faster-whisper>=1.0` and
 `piper-tts` unpinned — the packages are not installed in this environment
@@ -147,7 +163,7 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
   default `12`).
 - **Typed input** still works while voice is on — the reply is spoken
   too. `/voice off` stops the playback and the push-to-talk rounds.
-- If a dependency or device is missing (no `faster-whisper`, no `piper`,
+- If a dependency or device is missing (no `voxtype`, no `piper`,
   no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
   running in text mode — the REPL never crashes on voice errors.
 

@@ -17,7 +17,153 @@ import pytest
 from ana.cli import main, run_repl
 from ana.config import write_template
 from ana.voice import PiperTTS, VoiceError, WhisperSTT, record_to_wav
-from ana.voice.stt import default_max_seconds, stdin_press
+from ana.voice.stt import (VoxtypeSTT, build_stt, default_max_seconds,
+                           stdin_press)
+
+
+class TestCliSttFlag:
+    def test_flag_reaches_run_repl(self, monkeypatch):
+        import ana.cli as cli
+
+        seen = {}
+
+        def fake_repl(cfg_path, **kw):
+            seen.update(kw)
+            return []
+
+        monkeypatch.setattr(cli, "run_repl", fake_repl)
+        assert main(["--voice", "--stt", "whisper"]) == 0
+        assert seen["stt"] == "whisper"
+        assert seen["voice"] is True
+
+
+class _Proc:
+    """Minimal CompletedProcess stand-in for the voxtype _run seam."""
+
+    def __init__(self, stdout="", stderr="", rc=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = rc
+
+
+def _patch_run(monkeypatch, proc):
+    import ana.voice.stt as stt
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["kw"] = kw
+        return proc
+
+    monkeypatch.setattr(stt, "_run", fake_run)
+    return seen
+
+
+def _which_missing(monkeypatch, names="voxtype"):
+    import shutil as _shutil
+
+    real = _shutil.which
+
+    def fake_which(name):
+        if name == names:
+            return None
+        return real(name)
+
+    monkeypatch.setattr(_shutil, "which", fake_which)
+
+
+class TestVoxtypeSTT:
+    def test_transcribe_runs_voxtype_cli_and_returns_last_stdout_line(
+            self, monkeypatch, tmp_path):
+        # stdout mixes log lines (with ANSI color codes) and the exact
+        # transcription, which is always the last non-empty line.
+        proc = _Proc(
+            stdout="\x1b[2m2026-11-02T15:01:35Z\x1b[0m \x1b[33m WARN\x1b[0m "
+                   "Config section 'parakeet' could not be read.\n"
+                   "Loading audio file: \"in.wav\"\n"
+                   "Processing 48000 samples (3.00s)...\n"
+                   "Hola, soy Ana.\n")
+        seen = _patch_run(monkeypatch, proc)
+        wav = _write_wav(tmp_path / "in.wav")
+
+        assert VoxtypeSTT().transcribe(wav) == "Hola, soy Ana."
+        cmd = seen["cmd"]
+        assert cmd[0].endswith("voxtype") and cmd[1] == "transcribe"
+        assert cmd[-1] == str(wav)
+
+    def test_empty_wav_returns_empty_without_running_voxtype(
+            self, monkeypatch, tmp_path):
+        import ana.voice.stt as stt
+
+        def boom(*a, **kw):
+            raise AssertionError("voxtype must not run for empty audio")
+
+        monkeypatch.setattr(stt, "_run", boom)
+        wav = _write_wav(tmp_path / "empty.wav", nframes=0)
+        assert VoxtypeSTT().transcribe(wav) == ""
+
+    def test_missing_voxtype_binary_raises_actionable_voice_error(
+            self, monkeypatch, tmp_path):
+        _which_missing(monkeypatch)
+        wav = _write_wav(tmp_path / "in.wav")
+        with pytest.raises(VoiceError) as excinfo:
+            VoxtypeSTT().transcribe(wav)
+        msg = str(excinfo.value)
+        assert "voxtype not found" in msg
+        assert "ANA_STT=whisper" in msg  # documented fallback
+
+    def test_nonzero_exit_raises_with_stderr_tail(self, monkeypatch,
+                                                  tmp_path):
+        proc = _Proc(stderr="model file missing\n", rc=1)
+        _patch_run(monkeypatch, proc)
+        wav = _write_wav(tmp_path / "in.wav")
+        with pytest.raises(VoiceError) as excinfo:
+            VoxtypeSTT().transcribe(wav)
+        msg = str(excinfo.value)
+        assert "voxtype transcribe failed (exit 1)" in msg
+        assert "model file missing" in msg
+
+
+class TestBuildSTT:
+    def test_explicit_backend_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv("ANA_STT", "whisper")
+        assert isinstance(build_stt("voxtype"), VoxtypeSTT)
+
+    def test_env_backend_wins_over_default(self, monkeypatch):
+        monkeypatch.setenv("ANA_STT", "whisper")
+        assert isinstance(build_stt(), WhisperSTT)
+
+    def test_default_backend_is_voxtype(self, monkeypatch):
+        monkeypatch.delenv("ANA_STT", raising=False)
+        assert isinstance(build_stt(), VoxtypeSTT)
+
+    def test_unknown_backend_raises_actionable(self, monkeypatch):
+        monkeypatch.delenv("ANA_STT", raising=False)
+        with pytest.raises(VoiceError) as excinfo:
+            build_stt("muleto")
+        msg = str(excinfo.value)
+        assert "unknown STT backend" in msg
+        assert "voxtype, whisper" in msg
+
+
+class TestRecordToWav:
+    def test_ana_mic_device_pins_arecord_device(self, monkeypatch, tmp_path):
+        # $ANA_MIC_DEVICE forces a capture source instead of follow the
+        # system default (known failure: picking up speaker output).
+        monkeypatch.setenv("ANA_MIC_DEVICE",
+                           "alsa_input.usb-ICT_5M_USB_2.0_Camera"
+                           "_200901010001-02.analog-stereo")
+        procs = self._patch_popen(monkeypatch)
+        press = FakePress(results=(True, True))
+
+        record_to_wav(tmp_path / "in.wav", press=press)
+
+        cmd = procs[0].cmd
+        i = cmd.index("-D")
+        assert cmd[i + 1] == "alsa_input.usb-ICT_5M_USB_2.0_Camera"
+        "_200901010001-02.analog-stereo"
+        assert cmd[i + 1] and cmd.count("-D") == 1
+
 
 
 @pytest.fixture

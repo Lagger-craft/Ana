@@ -1,4 +1,4 @@
-"""Local speech-to-text (Phase 2, S9): mic capture + faster-whisper.
+"""Local speech-to-text (S9/S11): mic capture + voxtype/faster-whisper.
 
 Public names:
 - VoiceError (re-exported from ana.voice.errors)
@@ -12,6 +12,11 @@ Public names:
 - record_to_wav: push-to-talk recording — waits for a press to start the
   alsa-utils `arecord` binary (no Python audio dependencies) and stops it
   on a second press or at the max duration, whichever comes first.
+- VoxtypeSTT: transcription via the locally installed voxtype CLI
+  (`voxtype transcribe <wav>`) — the same engine the user dictates with.
+  The transcript is the last non-empty stdout line (voxtype prints its
+  progress logs around it).
+- build_stt: backend resolver — explicit argument > $ANA_STT > "voxtype".
 - default_max_seconds: max recording seconds (ANA_VOICE_MAX_SECONDS or 12).
 - stdin_press: default press seam (block on Enter, optional timeout).
 """
@@ -19,6 +24,7 @@ Public names:
 from __future__ import annotations
 
 import os
+import re
 import select
 import shutil
 import signal
@@ -29,10 +35,79 @@ from pathlib import Path
 
 from .errors import VoiceError
 
-__all__ = ["VoiceError", "WhisperSTT", "record_to_wav",
-           "default_max_seconds", "stdin_press"]
+__all__ = ["VoiceError", "WhisperSTT", "VoxtypeSTT", "build_stt",
+           "record_to_wav", "default_max_seconds", "stdin_press"]
 
 DEFAULT_MAX_SECONDS = 12.0
+VALID_STT_BACKENDS = ("voxtype", "whisper")
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _run(cmd, **kw):
+    """Run a subprocess. Module-level seam so tests can monkeypatch it."""
+    return subprocess.run(cmd, **kw)
+
+
+def _last_stdout_line(text: str) -> str:
+    """Last non-empty stdout line, ANSI stripped: the transcript.
+
+    `voxtype transcribe` writes progress logs on stdout around the
+    transcription; the transcript is always its final line.
+    """
+    lines = [line.strip() for line in _ANSI.sub("", text).splitlines()]
+    return ([line for line in lines if line] or [""])[-1]
+
+
+class VoxtypeSTT:
+    """Speech-to-text via the locally installed voxtype CLI (S11).
+
+    Ana records push-to-talk as before and hands the WAV to
+    `voxtype transcribe`. A WAV with zero frames (press/press with
+    nothing spoken) returns "" without running voxtype.
+    """
+
+    VOXTYPE_MISSING_MSG = (
+        "voxtype not found — install it (AUR: voxtype, Omarchy: "
+        "AI → Dictation) or set ANA_STT=whisper to fall back to "
+        "faster-whisper")
+
+    def __init__(self, binary: str | Path | None = None) -> None:
+        self._binary = str(binary) if binary is not None else None
+
+    def transcribe(self, wav_path: str | Path) -> str:
+        audio = _wav_pcm(wav_path)
+        if audio.size == 0:
+            return ""
+        vx = self._binary or shutil.which("voxtype")
+        if not vx:
+            raise VoiceError(self.VOXTYPE_MISSING_MSG)
+        try:
+            proc = _run([vx, "transcribe", str(wav_path)],
+                        capture_output=True, text=True)
+        except OSError as exc:
+            raise VoiceError(f"voxtype transcribe failed ({exc})") from None
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()
+            detail = f": {tail[-1]}" if tail else ""
+            raise VoiceError(
+                f"voxtype transcribe failed (exit {proc.returncode})"
+                f"{detail}")
+        return _last_stdout_line(proc.stdout or "")
+
+
+def build_stt(backend: str | None = None):
+    """Resolve the STT backend: explicit arg > $ANA_STT > "voxtype"."""
+    name = (backend if backend is not None
+            else os.environ.get("ANA_STT", "")).strip().lower() or "voxtype"
+    if name == "voxtype":
+        return VoxtypeSTT()
+    if name == "whisper":
+        return WhisperSTT()
+    opts = ", ".join(VALID_STT_BACKENDS)
+    raise VoiceError(
+        f"unknown STT backend {name!r} — options: {opts} "
+        "(ANA_STT / --stt)")
 
 
 def _segment_text(segment) -> str:
@@ -196,7 +271,12 @@ def record_to_wav(out_path: str | Path, max_seconds: float | None = None,
     out = Path(out_path)
 
     press()  # first press: start recording
-    cmd = ["arecord", "-f", "S16_LE", "-r", "16000", "-q", str(out)]
+    device = os.environ.get("ANA_MIC_DEVICE", "").strip()
+    # -D pins the capture source: the system default can point at a
+    # speaker monitor feed that records everything but speech (whisper
+    # then hallucinates silence subtitles).
+    cmd = (["arecord", "-D", device] if device else ["arecord"]) + \
+        ["-f", "S16_LE", "-r", "16000", "-q", str(out)]
     try:
         proc = subprocess.Popen(cmd)
     except OSError as exc:

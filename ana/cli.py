@@ -65,6 +65,7 @@ def run_repl(
     voice: bool = False,
     voice_secs: float | None = None,
     voice_fx: object | None = None,
+    stt: str | None = None,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
 
@@ -96,7 +97,7 @@ def run_repl(
     tools_on = tools
     active_registry: ToolRegistry | None = registry
     voice_on = voice
-    vfx = voice_fx if voice_fx is not None else _DefaultVoice()
+    vfx = voice_fx if voice_fx is not None else _DefaultVoice(stt)
 
     def press(timeout: float | None = None) -> bool:
         """Push-to-talk click seam: block until Enter (or up to timeout).
@@ -242,12 +243,17 @@ def run_repl(
 
 
 class _DefaultVoice:
-    """Live voice backend: push-to-talk arecord → faster-whisper → Piper.
+    """Live voice backend: push-to-talk arecord → STT → Piper.
 
+    STT backend resolution follows S11: $ANA_STT or the --stt flag;
+    default voxtype (falls back details in ana.voice.stt.build_stt).
     Imports the voice modules lazily so plain text sessions never touch
     them. The recorded WAV is deleted as soon as transcription finishes
     (or if recording fails), so mic audio does not linger on disk.
     """
+
+    def __init__(self, stt_backend: str | None = None) -> None:
+        self._stt_backend = stt_backend
 
     def record(self, max_seconds: float, press):
         import os
@@ -269,10 +275,10 @@ class _DefaultVoice:
     def transcribe(self, wav):
         from pathlib import Path
 
-        from .voice.stt import WhisperSTT
+        from .voice.stt import build_stt
 
         try:
-            return WhisperSTT().transcribe(wav)
+            return build_stt(self._stt_backend).transcribe(wav)
         finally:
             Path(wav).unlink(missing_ok=True)
 
@@ -397,6 +403,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="voice mode: push-to-talk (Enter starts/"
                              "stops recording; local STT, replies are "
                              "spoken via Piper)")
+    parser.add_argument("--stt", choices=("voxtype", "whisper"),
+                        help="STT backend for --voice; default voxtype "
+                             "(same engine as local dictation), "
+                             "$ANA_STT also works")
 
     args = parser.parse_args(argv)
 
@@ -447,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             provider_override=args.provider,
             tools=not args.no_tools,
             voice=args.voice,
+            stt=args.stt,
         )
         return 0
     except ConfigError as exc:

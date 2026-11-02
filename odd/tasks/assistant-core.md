@@ -14,6 +14,8 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 - **S8**: Phase 1 system tools are read-only (hyprctl status/workspaces/activewindow, system info); destructive shell execution is out of scope until a permission model exists.
 - **S9**: "Tambien que le pueda hablar por voice y ella tambien me responda con una voz." — Phase 2 adds bidirectional voice, fully local (privacy-first): faster-whisper STT and Piper TTS with a Spanish voice. Voice is opt-in per session (`--voice` / REPL `/voice on|off`), never forced.
 - **S10**: Voice defaults and quality tradeoffs: STT default model "small" (multilingual, CPU-friendly on the 5700X); Piper Spanish voice; both configurable later. No cloud STT/TTS in this phase.
+- **S11**: "Al giual podemos usar de base voxytype, ya que tambien lo tengo instalado y configurado.. Teóricamente BoxyType debería poder funcionar ya que este mismo mensaje, por ejemplo el de ahora, lo estoy realizando con ello... El problema es que claro, es una transcripción, no es un mensaje que vaya directo hacia una aplicación." — Ana's STT uses the locally installed voxtype (voxtype.io) as the base backend: Ana still records push-to-talk, but transcription runs through the voxtype engine the user already dictates with. Whisper (faster-whisper) stays as an alternate backend.
+- **S12": Default cloud provider requests keep failing (OpenCode Go free/paid tiers unavailable to the user), while "Con local si funciona." — the user's active default provider becomes ollama (local) until a cloud subscription decision is made.
 
 ## Tasks
 
@@ -33,7 +35,9 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T12 | S9,S10 | voice packages: faster-whisper + piper surface (optional deps) | (this commit) |
 | T13 | S9 | STT module: record mic → transcribe, fakeable | (this commit) |
 | T14 | S9 | TTS module: synth + play, fakeable | (this commit) |
-| T15 | S9,S10 | CLI voice loop: --voice + /voice, docs, live smoke | (this commit) |
+| T15 | S9,S10 | CLI voice loop: --voice + /voice, docs, live smoke | a260009 |
+| T16 | S11 | STT backend: voxtype transcribe CLI (default) + whisper alt, ANA_MIC_DEVICE | (this commit) |
+| T17 | S12 | user config default provider → ollama qwen3:8b (template untouched) | (no repo change) |
 
 ## Log
 
@@ -49,3 +53,4 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 - **L11** (correction, verbatim): "Esto pasa porque esta con un modelo local o porque paso? Porque lo que se ve falta configur rapido el tiempo del que uno estara hablando" — root cause was PyAV 19 incompatibility (not local/cloud); fixed by bypassing av with a raw PCM array, and recording is now push-to-talk (Enter/Enter) with ANA_VOICE_MAX_SECONDS.
 - **L12** (evidence): first live voice smoke with real deps (user had already installed faster-whisper 1.2.1, piper-tts 1.8.0, es_AR-daniela-high voice, whisper-small cached). PiperTTS.speak failed live: piper 1.8 CLI reads its text from stdin, but speak() passed no text — piper synthesized zero samples and crashed closing the WAV ("# channels not specified"); tests never caught it because the `_run` seam was monkeypatched. Fixed: speak() feeds the text as UTF-8 stdin; new test pins it (RED→GREEN). Live result: TTS speaks aloud via paplay; STT round-trip transcribes the piper-synthesized WAV correctly ("Hola, soy Ana y esta es mi primera prueba de voz en vivo."). 99 tests pass. Remaining: interactive mic loop (`arecord` push-to-talk) needs the user at the terminal — pending their own `--voice` REPL test.
 - **L13** (evidence): code-size audit answered the user's segmentation question: largest module ana/cli.py (458 lines), all others ≤262; modularization is adequate, no split needed now; revisit when Phase 3 adds image handling (natural home: ana/vision/, as ana/voice/ was).
+- **L14** (report, verbatim): "you> Subtítulos por la comunidad de Amara.org ... error: provider returned HTTP 400: Upstream request failed: Model is unavailable. ... 2 Pruebas realizadas y el mismo error. Al giual podemos usar de base voxytype" — two failures diagnosed: (a) whisper over mic noise/saturated speaker bleed hallucinates the Amara.org silence subtitle; (b) the 400 is provider-level (default opencode / grok-code-fast-1 without an active Go subscription, not voice). T16 (voxtype backend) + T17 (local default) come from this.
