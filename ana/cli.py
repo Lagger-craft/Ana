@@ -266,12 +266,24 @@ def run_repl(
                               images=attachments)
         if turn_state == "tools-unavailable":
             tools_on = False  # stay off for the rest of the session
-        if (voice_on and turn_state in ("ok", "tools-unavailable")
+        # S15b: the REPL drives the overlay like the TUI does — the
+        # subtitle gets every NEW reply (never a rolled-back stale one),
+        # and voice wraps the speak with talk→idle. waifu_send is a
+        # silent no-op when no overlay listens.
+        from .waifu import waifu_send
+
+        if (turn_state in ("ok", "tools-unavailable")
                 and history and history[-1]["role"] == "assistant"):
-            try:
-                vfx.speak(history[-1]["content"])
-            except VoiceError as exc:
-                emit(f"(voice unavailable: {exc})")
+            reply = history[-1]["content"]
+            waifu_send({"type": "say", "text": reply})
+            if voice_on:
+                waifu_send({"type": "state", "state": "talk"})
+                try:
+                    vfx.speak(reply)
+                except VoiceError as exc:
+                    emit(f"(voice unavailable: {exc})")
+                finally:
+                    waifu_send({"type": "state", "state": "idle"})
         emit("")
 
     return history

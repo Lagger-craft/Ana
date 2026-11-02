@@ -2,6 +2,11 @@
 
 import json
 
+import pytest
+
+from ana.client import ProviderError
+from ana.cli import run_repl
+from ana.config import write_template
 from ana.waifu import parse_event, resolve_asset, WaifuState
 
 
@@ -126,6 +131,92 @@ class TestFifoSend:
 
         monkeypatch.setattr("ana.waifu.fifo_path", lambda: tmp_path / "no.fifo")
         waifu_send({"type": "state", "state": "talk"})  # no crash, no error
+
+
+# -------------------------------- corte 4: REPL cableado (T34/S15b)
+
+
+class TestReplWaifuEvents:
+    """The classic REPL drives the overlay exactly like the TUI does."""
+
+    @pytest.fixture
+    def cfg(self, tmp_path):
+        path = tmp_path / "config.toml"
+        write_template(path)
+        return path
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        events = []
+        monkeypatch.setattr("ana.waifu.waifu_send", events.append)
+        return events
+
+    def test_reply_sends_say_event(self, cfg, sent):
+        run_repl(cfg_path=cfg, lines=["hola", "/exit"],
+                 stream=lambda msgs, model, system=None: iter(["hola!"]))
+        assert sent == [{"type": "say", "text": "hola!"}]
+
+    def test_failed_turn_sends_no_stale_say(self, cfg, sent):
+        # turn 1 ok, turn 2 fails: the rollback leaves the OLD assistant
+        # reply as history[-1] — the waifu must NOT hear it again.
+        replies = iter([iter(["uno"]), ProviderError("boom")])
+
+        def stream(msgs, model, system=None):
+            item = next(replies)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        run_repl(cfg_path=cfg, lines=["a", "b", "/exit"], stream=stream)
+        assert sent == [{"type": "say", "text": "uno"}]
+
+    def test_voice_off_sends_say_without_state(self, cfg, sent):
+        run_repl(cfg_path=cfg, lines=["hola", "/exit"],
+                 stream=lambda msgs, model, system=None: iter(["hola!"]),
+                 voice=False)
+        assert sent == [{"type": "say", "text": "hola!"}]
+
+    def test_voice_reply_wraps_speak_with_talk_then_idle(self, cfg, sent):
+        class V:
+            def record(self, max_seconds, press):
+                raise AssertionError("typed turn must not record")
+
+            def transcribe(self, wav):
+                raise AssertionError("typed turn must not transcribe")
+
+            def speak(self, text):
+                events.append(("spoken", text))
+
+        events = []
+        run_repl(cfg_path=cfg, lines=["hola", "/exit"],
+                 stream=lambda msgs, model, system=None: iter(["hola!"]),
+                 voice=True, voice_fx=V())
+        assert sent == [
+            {"type": "say", "text": "hola!"},
+            {"type": "state", "state": "talk"},
+            {"type": "state", "state": "idle"},
+        ]
+        assert events == [("spoken", "hola!")]
+
+    def test_speak_failure_still_returns_to_idle(self, cfg, sent):
+        from ana.voice import VoiceError
+
+        class V:
+            def record(self, max_seconds, press):
+                raise AssertionError("typed turn must not record")
+
+            def transcribe(self, wav):
+                raise AssertionError("typed turn must not transcribe")
+
+            def speak(self, text):
+                raise VoiceError("piper not installed")
+
+        history = run_repl(
+            cfg_path=cfg, lines=["hola", "/exit"],
+            stream=lambda msgs, model, system=None: iter(["hola!"]),
+            voice=True, voice_fx=V())
+        assert sent[-1] == {"type": "state", "state": "idle"}
+        assert history[-1] == {"role": "assistant", "content": "hola!"}
 
 
 # -------------------------------- corte 3: blink/fade/tamaño (T32)

@@ -162,6 +162,11 @@ one; `$ANA_WAIFU_AVOID`, default DP-1 for the gaming screen),
 2:80". Events: JSON lines on the FIFO — `say` sets the subtitle,
 `state` swaps idle/talk/blink, `quit` closes the window.
 
+**Who sends them:** every frontend that talks to Ana — both `ana tui`
+and the classic REPL (`ana`) push each reply as a `say` event, and voice
+rounds wrap the Piper speak with `state: talk` → `state: idle` (S15b),
+so the waifu reacts the same way no matter where you chat.
+
 ## Voice (Phase 2)
 
 Bidirectional voice, **fully local** (S9/S10): voxtype for
