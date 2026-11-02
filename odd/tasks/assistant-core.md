@@ -43,7 +43,7 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T20 | S4 | client: multimodal image content (chat+anthropic), reasoning events | 46128cf |
 | T21 | S4 | CLI: --image one-shot + REPL /img, vision_model config default | 46128cf |
 | T22 | S4 | docs + live smoke vs ollama qwen3-vl | 46128cf |
-| T23 | S4 | speed levers: vision_max_tokens + image downscale + keep_alive | (pending commit) |
+| T23 | S4 | speed levers: vision_max_tokens + image downscale + keep_alive | 1ddb2f1 |
 
 ## Log
 
