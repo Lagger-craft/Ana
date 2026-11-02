@@ -100,10 +100,15 @@ dictate with (`voxtype.io`, AUR `voxtype` / Omarchy AI → Dictation).
 Alternative: faster-whisper (`ANA_STT=whisper`, or `--stt whisper`).
 
 - `--stt voxtype|whisper` selects per run; `$ANA_STT` does it per shell.
-- `$ANA_MIC_DEVICE` pins the capture source instead of the default
-  (arecord `-D`). Useful if the default source is not your microphone —
-  e.g. a speaker monitor feed that records everything but speech
-  (whisper then hallucinates silence subtitles).
+- **Capture source**: the push-to-talk recorder follows the PipeWire
+  default source via `pw-record --target` — only that mic node is
+  recorded, never the system audio mix. ALSA-style names (`hw:CARD=...`)
+  go through `arecord -D`. `$ANA_MIC_DEVICE` pins a specific node.
+- **Feedback in the REPL**: every voice round shows which mic it uses
+  (`(🎙 mic: Razer Seiren Mini · ...)`) and warns when a take peaks
+  near-silently (`ANA_VOICE_MIN_DB`, default -35 dBFS) — a muted tap-mute
+  mic used to look like whisper hallucinations (“Gracias por ver el
+  video”) instead of an error.
 
 ### Install
 

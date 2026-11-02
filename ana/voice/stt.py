@@ -9,9 +9,19 @@ Public names:
   PCM array, so PyAV is never involved (PyAV 19 removed the
   `av.open(..., metadata_errors=...)` kwarg faster-whisper's path decoder
   uses).
-- record_to_wav: push-to-talk recording — waits for a press to start the
-  alsa-utils `arecord` binary (no Python audio dependencies) and stops it
-  on a second press or at the max duration, whichever comes first.
+- capture_source: the mic to record from ($ANA_MIC_DEVICE, else the
+  PipeWire default source, else "default"); used to show the mic and
+  to make the capture explicit.
+- mic_label: short node name of the capture source, for the REPL hint.
+- peak_db: dBFS peak of a recorded WAV; the REPL warns about
+  near-silent takes (a muted tap-mute mic yields whisper hallucinations
+  instead of an error — “Gracias por ver el video” over silence).
+- min_peak_db: warning threshold ($ANA_VOICE_MIN_DB or -35 dB).
+- record_to_wav: push-to-talk recording — waits for a press to start
+  and stops on the second press or at the max duration. PipeWire-node
+  source → ``pw-record --target`` so ONLY that node is captured (never
+  a system output or monitor mix); ALSA-style names (hw:, CARD=...)
+  go through arecord -D.
 - VoxtypeSTT: transcription via the locally installed voxtype CLI
   (`voxtype transcribe <wav>`) — the same engine the user dictates with.
   The transcript is the last non-empty stdout line (voxtype prints its
@@ -33,9 +43,15 @@ import sys
 import wave
 from pathlib import Path
 
+try:
+    import numpy as np
+except ImportError:  # the optional voice extra may not be installed
+    np = None
+
 from .errors import VoiceError
 
 __all__ = ["VoiceError", "WhisperSTT", "VoxtypeSTT", "build_stt",
+           "capture_source", "mic_label", "peak_db", "min_peak_db",
            "record_to_wav", "default_max_seconds", "stdin_press"]
 
 DEFAULT_MAX_SECONDS = 12.0
@@ -258,34 +274,122 @@ def record_to_wav(out_path: str | Path, max_seconds: float | None = None,
     12), whichever comes first; arecord then receives SIGINT so it
     finalizes the WAV header.
 
-    Raises VoiceError when arecord is not installed (pointer to alsa-utils
-    and the pw-record alternative) or when the recording command fails.
+    Raises VoiceError when no recorder is installed (alsa-utils' arecord
+    or pipewire-utils' pw-record) or when the recording command fails.
     """
-    if shutil.which("arecord") is None:
-        raise VoiceError(
-            "arecord not found — install alsa-utils (pacman -S alsa-utils); "
-            "with PipeWire you can also use pw-record instead")
     if press is None:
         press = stdin_press
     limit = default_max_seconds() if max_seconds is None else max_seconds
     out = Path(out_path)
 
+    recorder, head = _record_cmd(out, capture_source())
+    if recorder is None:
+        raise VoiceError(
+            "no audio recorder found — install alsa-utils (arecord) or "
+            "pipewire-utils (pw-record)")
     press()  # first press: start recording
-    device = os.environ.get("ANA_MIC_DEVICE", "").strip()
-    # -D pins the capture source: the system default can point at a
-    # speaker monitor feed that records everything but speech (whisper
-    # then hallucinates silence subtitles).
-    cmd = (["arecord", "-D", device] if device else ["arecord"]) + \
-        ["-f", "S16_LE", "-r", "16000", "-q", str(out)]
     try:
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(head)
     except OSError as exc:
-        raise VoiceError(f"recording failed (arecord: {exc})") from None
+        raise VoiceError(f"recording failed ({recorder}: {exc})") from None
     try:
         press(timeout=limit)  # second press or auto-stop at `limit`
     finally:
         _stop_recording(proc)
     if not out.exists():
         raise VoiceError(
-            f"recording failed (arecord exit {proc.returncode})")
+            f"recording failed ({recorder} exit {proc.returncode})")
     return out
+
+
+def _record_cmd(out: Path, source: str):
+    """(recorder, final argv), or (None, None) with no recorder.
+
+    A PipeWire node name (pactl / $ANA_MIC_DEVICE) records via
+    ``pw-record --target`` so ONLY that node is captured — never a
+    system output or monitor mix. ALSA-style names (hw:, pulse, ...)
+    go through the alsa-utils ``arecord -D``. An empty/de"fault"
+    source follows the PipeWire default source (pw-record auto, or
+    arecord's default).
+    """
+    pw = shutil.which("pw-record")
+    arecord = shutil.which("arecord")
+    source = (source or "").strip()
+    alsa_named = (bool(re.match(
+        r"^(?:hw|plug|sysdefault|front|surround|phys):", source))
+        or source in ("pulse", "pipewire"))
+    if alsa_named:
+        if arecord:
+            head = ["arecord", "-f", "S16_LE", "-r", "16000", "-q"]
+            if source != "default":
+                head = ["arecord", "-D", source, *head]
+            return "arecord", [*head, str(out)]
+        if pw:
+            return "pw-record", ["pw-record", "--target", source,
+                                 "--rate", "16000", "--channels", "1",
+                                 str(out)]
+        return None, None
+    if source and pw:
+        return "pw-record", ["pw-record", "--target", source,
+                             "--rate", "16000", "--channels", "1",
+                             str(out)]
+    if pw:  # empty or "default": pw-record auto-targets the PW default
+        return "pw-record", ["pw-record", "--rate", "16000",
+                             "--channels", "1", str(out)]
+    if arecord:
+        return "arecord", ["arecord", "-f", "S16_LE", "-r", "16000",
+                           "-q", str(out)]
+    return None, None
+
+
+def capture_source() -> str:
+    """The mic to record from: $ANA_MIC_DEVICE, else the PipeWire
+    default source (pactl), else "default" (ALSA resolves the default)."""
+    env = os.environ.get("ANA_MIC_DEVICE", "").strip()
+    if env:
+        return env
+    try:
+        proc = _run(["pactl", "get-default-source"],
+                    capture_output=True, text=True)
+    except OSError:
+        return "default"
+    raw = (proc.stdout or "").strip()
+    if proc.returncode == 0 and raw:
+        return raw
+    return "default"
+
+
+def mic_label(source: str | None = None) -> str:
+    """Short label of the capture source for the REPL hint.
+
+    'alsa_input.usb-0c76_Razer_Seiren_Mini-00.mono-fallback' →
+    'Razer Seiren Mini'; anything unrecognized stays as-is.
+    """
+    src = (source if source is not None else capture_source()).strip()
+    base = re.sub(r"^alsa_(?:input|output|capture)\.", "", src)
+    base = re.sub(r"\.(?:mono-fallback|analog-stereo)$", "", base)
+    base = re.sub(r"^usb-", "", base)
+    base = base.replace("_", " ")
+    base = re.sub(r"\b[0-9a-fA-F]{4}\b", "", base)  # vendor ids (0c76)
+    base = re.sub(r"\d{5,}", "", base)              # long serial numbers
+    base = re.sub(r"-\d{1,3}$", "", base)           # trailing index
+    label = " ".join(base.split())
+    return label or src
+
+
+def peak_db(wav_path: str | Path) -> float:
+    """Peak level of a WAV in dBFS; -96.0 when effectively silent."""
+    audio = _wav_pcm(wav_path)
+    if audio.size == 0:
+        return -96.0
+    peak = float(np.abs(audio).max())
+    return float(np.log10(peak) * 20.0) if peak > 0 else -96.0
+
+
+def min_peak_db() -> float:
+    """Warning threshold: $ANA_VOICE_MIN_DB (dBFS) or -35."""
+    raw = os.environ.get("ANA_VOICE_MIN_DB", "").strip()
+    try:
+        return float(raw) if raw else -35.0
+    except ValueError:
+        return -35.0

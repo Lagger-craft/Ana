@@ -4,6 +4,7 @@ Covers ana.voice.stt (WhisperSTT, record_to_wav), ana.voice.tts
 (PiperTTS, resolve_voice) and the run_repl voice seam (/voice, --voice).
 """
 
+import os
 import signal
 import struct
 import sys
@@ -17,7 +18,8 @@ import pytest
 from ana.cli import main, run_repl
 from ana.config import write_template
 from ana.voice import PiperTTS, VoiceError, WhisperSTT, record_to_wav
-from ana.voice.stt import (VoxtypeSTT, build_stt, default_max_seconds,
+from ana.voice.stt import (VoxtypeSTT, build_stt, capture_source,
+                           default_max_seconds, mic_label, peak_db,
                            stdin_press)
 
 
@@ -199,24 +201,6 @@ class TestBuildSTT:
         assert "voxtype, whisper" in msg
 
 
-class TestRecordToWav:
-    def test_ana_mic_device_pins_arecord_device(self, monkeypatch, tmp_path):
-        # $ANA_MIC_DEVICE forces a capture source instead of follow the
-        # system default (known failure: picking up speaker output).
-        monkeypatch.setenv("ANA_MIC_DEVICE",
-                           "alsa_input.usb-ICT_5M_USB_2.0_Camera"
-                           "_200901010001-02.analog-stereo")
-        procs = self._patch_popen(monkeypatch)
-        press = FakePress(results=(True, True))
-
-        record_to_wav(tmp_path / "in.wav", press=press)
-
-        cmd = procs[0].cmd
-        i = cmd.index("-D")
-        assert cmd[i + 1] == "alsa_input.usb-ICT_5M_USB_2.0_Camera"
-        "_200901010001-02.analog-stereo"
-        assert cmd[i + 1] and cmd.count("-D") == 1
-
 
 
 @pytest.fixture
@@ -317,14 +301,21 @@ class TestWhisperSTT:
         wav = _write_wav(tmp_path / "in.wav", nframes=1)
         assert WhisperSTT().transcribe(wav) == ""
 
-    def test_module_imports_cleanly_without_faster_whisper(self, monkeypatch):
-        # a fresh import of the module must succeed with the package absent
-        monkeypatch.delitem(sys.modules, "ana.voice.stt", raising=False)
-        monkeypatch.setitem(sys.modules, "faster_whisper", None)
-        import importlib
+    def test_module_imports_cleanly_without_faster_whisper(self, tmp_path):
+        # a fresh interpreter import must succeed with the package absent
+        # (in-process re-import replaced the cached module mid-session and
+        # left every later test patching a stale copy — subprocess is clean)
+        import subprocess
 
-        mod = importlib.import_module("ana.voice.stt")
-        assert mod.WhisperSTT().model_size == "small"  # fresh module, no fw
+        code = (
+            "import sys, importlib\n"
+            "sys.modules['faster_whisper'] = None\n"
+            "mod = importlib.import_module('ana.voice.stt')\n"
+            "assert mod.WhisperSTT().model_size == 'small'\n")
+        env = {**os.environ, "PYTHONPATH": "."}
+        proc = subprocess.run([sys.executable, "-c", code], env=env,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
 
 
 class FakePress:
@@ -362,6 +353,8 @@ class FakeProc:
 class TestRecordToWav:
     @staticmethod
     def _patch_popen(monkeypatch):
+        """Legacy arecord world: no pw-record, no PipeWire default query."""
+        import ana.voice.stt as stt
         procs = []
 
         def fake_popen(cmd, **kw):
@@ -370,8 +363,40 @@ class TestRecordToWav:
             return proc
 
         monkeypatch.setattr("subprocess.Popen", fake_popen)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name: None if name == "pw-record" else f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            stt, "capture_source",
+            lambda: os.environ.get("ANA_MIC_DEVICE", "").strip())
         return procs
+
+    def test_ana_mic_device_targets_pipewire_source(self, monkeypatch,
+                                                    tmp_path):
+        """$ANA_MIC_DEVICE pins a PipeWire capture node explicitly."""
+        import ana.voice.stt as stt
+        monkeypatch.setenv("ANA_MIC_DEVICE",
+                           "alsa_input.usb-ICT_5M_USB_2.0_Camera"
+                           "_200901010001-02.analog-stereo")
+        # pw-record exists here (the fixture hides it for legacy tests)
+        monkeypatch.setattr(
+            stt, "capture_source",
+            lambda: "alsa_input.usb-ICT_5M_USB_2.0_Camera"
+                    "_200901010001-02.analog-stereo")
+        procs = self._patch_popen(monkeypatch)
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name: None if name == "arecord" else f"/usr/bin/{name}")
+        press = FakePress(results=(True, True))
+
+        record_to_wav(tmp_path / "in.wav", press=press)
+
+        cmd = procs[0].cmd
+        assert cmd[0].endswith("pw-record"), cmd
+        i = cmd.index("--target")
+        assert cmd[i + 1] == ("alsa_input.usb-ICT_5M_USB_2.0_Camera"
+                              "_200901010001-02.analog-stereo")
+        assert cmd[-1].endswith(".wav")
 
     def test_push_to_talk_starts_arecord_on_first_press(
             self, monkeypatch, tmp_path):
@@ -436,7 +461,11 @@ class TestRecordToWav:
 
     def test_arecord_failure_raises_voice_error(self, monkeypatch, tmp_path):
         # arecord exits without producing a WAV (e.g. no capture device)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name: None if name == "pw-record" else f"/usr/bin/{name}")
+        import ana.voice.stt as stt
+        monkeypatch.setattr(stt, "capture_source", lambda: "")
 
         class DeadProc(FakeProc):
             def __init__(self, cmd, **kw):
@@ -649,8 +678,8 @@ class TestVoiceLoop:
             cfg_path=cfg, lines=["", "", "", "/exit"],
             stream=stream_ok("ok!"), voice=True, voice_fx=fx)
         out = capsys.readouterr().out
-        assert ("(🎙 Enter para empezar, Enter para terminar (max 12s))"
-                in out)
+        assert "(🎙" in out and "Enter para empezar" in out
+        assert "mic:" in out  # the hint shows the capture source
         assert fx.recorded == [12.0]  # default max seconds
         assert fx.press_results == [(True, True)]  # two-press round
         assert history[0] == {"role": "user", "content": "di hola"}
@@ -786,3 +815,176 @@ def test_piper_binary_falls_back_to_venv_bin(monkeypatch, tmp_path):
     monkeypatch.setattr(tts_mod.sys, "executable", str(tmp_path / "python"))
     tts_inst = tts_mod.PiperTTS(voice=str(tmp_path / "voice.onnx"))  # noqa: F841 (used below)
     assert tts_mod._piper_binary() == str(fake_piper)
+
+
+class TestCaptureSource:
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv("ANA_MIC_DEVICE", "hw:CARD=Mini")
+        assert capture_source() == "hw:CARD=Mini"
+
+    def test_pactl_default_source_query(self, monkeypatch):
+        import ana.voice.stt as stt
+
+        monkeypatch.delenv("ANA_MIC_DEVICE", raising=False)
+
+        def fake_run(cmd, **kw):
+            assert cmd[:2] == ["pactl", "get-default-source"]
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout="alsa_input.usb-0c76_Razer_Seiren_Mini-00"
+                       ".mono-fallback\n",
+                stderr="")
+
+        monkeypatch.setattr(stt, "_run", fake_run)
+        assert capture_source() == ("alsa_input.usb-0c76_Razer_Seiren_Mini"
+                                    "-00.mono-fallback")
+
+    def test_missing_pactl_falls_back_to_default(self, monkeypatch):
+        import ana.voice.stt as stt
+
+        monkeypatch.delenv("ANA_MIC_DEVICE", raising=False)
+
+        def boom(cmd, **kw):
+            raise OSError("no pactl")
+
+        monkeypatch.setattr(stt, "_run", boom)
+        assert capture_source() == "default"
+
+
+class TestRecorderSelection:
+    """Record must capture only ONE mic node — never a monitor mix."""
+
+    def test_pw_record_targets_the_pipe_wire_source(self, monkeypatch,
+                                                    tmp_path):
+        import ana.voice.stt as stt
+
+        monkeypatch.setattr("shutil.which", lambda n: f"/usr/bin/{n}")
+        monkeypatch.setattr(
+            stt, "capture_source",
+            lambda: "alsa_input.usb-0c76_Razer_Seiren_Mini-00"
+                    ".mono-fallback")
+        procs = self._popen(monkeypatch)
+        press = FakePress(results=(True, True))
+
+        record_to_wav(tmp_path / "in.wav", press=press)
+
+        cmd = procs[0].cmd
+        assert cmd[0] == "pw-record"  # PATH lookup, not the which() value
+        assert "--rate" in cmd and cmd[cmd.index("--rate") + 1] == "16000"
+        assert "--target" in cmd
+        assert cmd[-1] == str(tmp_path / "in.wav")
+
+    def test_aplay_style_env_name_routes_via_arecord_minus_D(
+            self, monkeypatch, tmp_path):
+        import ana.voice.stt as stt
+
+        monkeypatch.setattr("shutil.which", lambda n: f"/usr/bin/{n}")
+        monkeypatch.setattr(stt, "capture_source", lambda: "hw:CARD=Mini")
+        procs = self._popen(monkeypatch)
+        press = FakePress(results=(True, True))
+
+        record_to_wav(tmp_path / "in.wav", press=press)
+
+        cmd = procs[0].cmd
+        assert cmd[0] == "arecord"  # PATH lookup, not the which() value
+        i = cmd.index("-D")
+        assert cmd[i + 1] == "hw:CARD=Mini"
+
+    def test_missing_both_recorders_raises_actionable(self, monkeypatch,
+                                                      tmp_path):
+        import ana.voice.stt as stt
+
+        monkeypatch.setattr("shutil.which", lambda n: None)
+        monkeypatch.setattr(stt, "capture_source", lambda: "default")
+        press = FakePress(results=())
+        with pytest.raises(VoiceError) as excinfo:
+            record_to_wav(tmp_path / "in.wav", press=press)
+        msg = str(excinfo.value)
+        assert "alsa-utils" in msg and "pipewire-utils" in msg
+
+    @staticmethod
+    def _popen(monkeypatch):
+        procs = []
+
+        def fake_popen(cmd, **kw):
+            Path(cmd[-1]).touch()
+            proc = types.SimpleNamespace(
+                cmd=cmd, signals=[],
+                send_signal=lambda sig: procs[-1].signals.append(sig),
+                wait=lambda timeout=None: 0, kill=lambda: None,
+                returncode=0)
+            procs.append(proc)
+            return proc
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        return procs
+
+
+class TestPeakDb:
+    def test_loud_wav_measures_positive_db(self, tmp_path):
+        # full-scale sine sample: 0.5 → -6.02 dBFS
+        assert peak_db(_write_wav(tmp_path / "loud.wav",
+                                  sample=16384)) == pytest.approx(-6.02,
+                                                                  abs=0.01)
+
+    def test_near_silent_wav_floors_at_minus_96(self, tmp_path):
+        assert peak_db(_write_wav(tmp_path / "quiet.wav",
+                                  sample=10)) < -30  # halved: tiny sample
+
+    def test_empty_wav_is_below_any_threshold(self, tmp_path):
+        assert peak_db(_write_wav(tmp_path / "empty.wav", nframes=0)) == -96.0
+
+
+class TestMicLabel:
+    def test_raw_pipe_wire_node_friendly(self):
+        assert mic_label("alsa_input.usb-0c76_Razer_Seiren_Mini-00"
+                         ".mono-fallback") == "Razer Seiren Mini"
+
+    def test_camera_node(self):
+        assert mic_label("alsa_input.usb-ICT_5M_USB_2.0_Camera_200901010001"
+                         "-02.analog-stereo") == "ICT 5M USB 2.0 Camera"
+
+    def test_default_falls_back(self):
+        assert mic_label("default") == "default"
+
+
+class TestVoiceFeedback:
+    """The user asked: show the mic used and warn on near-silent takes."""
+
+    def _run(self, cfg, sample, transcript="hola"):
+        wav = _write_wav(cfg.parent / "take.wav", sample=sample)
+        os.environ["ANA_MIC_DEVICE"] = "alsa_input.usb-RAZER.wav"
+        try:
+            class Fake:
+                def record(self, max_seconds, press):
+                    press()
+                    press(timeout=max_seconds)
+                    return wav
+
+                def transcribe(self, path):
+                    assert Path(path) == wav
+                    return transcript
+
+                def speak(self, text):
+                    pass
+
+            out = []
+            run_repl(cfg, lines=["", "exit"],
+                     stream=stream_ok(), voice=True, voice_fx=Fake(),
+                     emit=out.append)
+        finally:
+            os.environ.pop("ANA_MIC_DEVICE", None)
+        return "\n".join(out)
+
+    def test_hint_shows_the_mic_name(self, cfg):
+        text = self._run(cfg, sample=16000)
+        assert "(🎙 mic: RAZER" in text
+        assert "Enter para empezar" in text
+
+    def test_near_silent_take_warns_with_meter(self, cfg):
+        text = self._run(cfg, sample=10)
+        assert "casi silenciosa" in text
+
+    def test_loud_take_does_not_warn(self, cfg):
+        text = self._run(cfg, sample=16000)
+        assert "casi silenciosa" not in text

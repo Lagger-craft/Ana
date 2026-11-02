@@ -21,7 +21,8 @@ from .client import ProviderClient, ProviderError
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
 from .tools import build_default_tools
 from .voice import VoiceError
-from .voice.stt import default_max_seconds, stdin_press
+from .voice.stt import (default_max_seconds, mic_label, min_peak_db,
+                        peak_db, stdin_press)
 
 StreamFn = Callable[..., Iterator[str]]
 
@@ -143,9 +144,16 @@ def run_repl(
             try:
                 max_secs = (voice_secs if voice_secs is not None
                             else default_max_seconds())
-                emit("(🎙 Enter para empezar, Enter para terminar "
-                     f"(max {max_secs:g}s))")
+                emit(f"(🎙 mic: {mic_label()} · Enter para empezar, "
+                     f"Enter para terminar (max {max_secs:g}s))")
                 wav = vfx.record(max_secs, press)
+                try:
+                    level = peak_db(wav)
+                except VoiceError:
+                    level = None  # unreadable wav: transcribe will report it
+                if level is not None and level < min_peak_db():
+                    emit(f"(🎙 grabación casi silenciosa ({level:.1f} dB) "
+                         "— hablá cerca o revisá el mute del mic)")
                 heard = (vfx.transcribe(wav) or "").strip()
             except VoiceError as exc:
                 emit(f"(voice unavailable: {exc})")
