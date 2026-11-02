@@ -47,7 +47,7 @@ Waifu virtual assistant for Arch Linux (Omarchy + Hyprland). Multi-phase project
 | T23 | S4 | speed levers: vision_max_tokens + image downscale + keep_alive | 1ddb2f1 |
 | T24 | S13 | Textual TUI app: chat panel + input + streaming, command parity (/model /provider /new /img), ana tui subcommand | 0c9733f |
 | T25 | S13 | TUI docs + pyproject extras + smoke | 0c9733f (docs included) |
-| T26 | S9,S13 | voz en la TUI: /voice on|off, push-to-talk por Enter vacío, respuesta hablada | (pending commit) |
+| T26 | S9,S13 | voz en la TUI: /voice on|off, push-to-talk por Enter vacío, respuesta hablada | 8929d4d |
 
 ## Log
 
