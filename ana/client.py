@@ -18,6 +18,36 @@ import httpx
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
 
+def _payload_messages(messages, anthropic: bool) -> list[dict]:
+    """Provider-facing copy of the history, with images per dialect.
+
+    A message like {role, content, images: [{media_type, data(base64)}]}
+    becomes {role, content: [text, image parts]} for either dialect:
+    chat-completions wants image_url data-URIs, Anthropic wants a base64
+    source. The provider-facing copy never carries the internal `images`
+    key; plain messages pass through untouched.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        if "images" not in msg:
+            out.append(msg)
+            continue
+        content: list[dict] = [
+            {"type": "text", "text": str(msg.get("content", ""))}]
+        for image in msg["images"]:
+            mime = str(image.get("media_type", "image/png"))
+            data = str(image.get("data", ""))
+            if anthropic:
+                content.append({"type": "image", "source": {
+                    "type": "base64", "media_type": mime, "data": data}})
+            else:
+                content.append({"type": "image_url", "image_url": {
+                    "url": f"data:{mime};base64,{data}"}})
+        out.append({"role": msg.get("role", "user"), "content": content})
+    return out
+
+
+
 class ProviderError(Exception):
     """Raised when the provider returns an error response."""
 
@@ -102,7 +132,7 @@ class ProviderClient:
         self, messages: list[dict[str, str]], model: str, system: str | None,
         tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
-        payload_messages = list(messages)
+        payload_messages = _payload_messages(messages, anthropic=False)
         if system:
             payload_messages.insert(0, {"role": "system", "content": system})
         payload: dict = {
@@ -116,7 +146,9 @@ class ProviderClient:
         self, messages: list[dict[str, str]], model: str, system: str | None,
         tools: list[dict] | None = None,
     ) -> tuple[str, dict]:
-        payload: dict = {"model": model, "messages": messages, "stream": True}
+        payload_messages = _payload_messages(messages, anthropic=True)
+        payload: dict = {"model": model, "messages": payload_messages,
+                         "stream": True}
         if system:
             payload["system"] = system
         if tools:
@@ -177,6 +209,12 @@ class ProviderClient:
                 raise ProviderError(f"provider error: {msg or event}")
             choice = event.get("choices", [{}])[0]
             delta = choice.get("delta", {})
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+            if reasoning:
+                # reasoning models (qwen3*, deepseek...) stream thinking in a
+                # separate field while content stays empty: surface it so the
+                # caller can show progress instead of a frozen prompt.
+                yield {"type": "reasoning", "content": str(reasoning)}
             text = delta.get("content")
             if text:
                 yield {"type": "text", "content": text}
@@ -235,7 +273,10 @@ class ProviderClient:
             elif etype == "content_block_delta":
                 delta = event.get("delta", {})
                 dtype = delta.get("type")
-                if dtype == "text_delta" and delta.get("text"):
+                if dtype == "thinking_delta" and delta.get("thinking"):
+                    yield {"type": "reasoning",
+                           "content": str(delta["thinking"])}
+                elif dtype == "text_delta" and delta.get("text"):
                     if current_text is None:  # no start event seen (lenient)
                         current_text = []
                     current_text.append(delta["text"])

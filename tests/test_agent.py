@@ -228,3 +228,43 @@ def FakeServer_with(path, bodies=None):
     # thin helper: FakeServer from test_client expects route(path) tuple
     from tests.test_client import FakeServer as _FS
     return _FS(path)
+
+
+class TestReasoningNote:
+    def test_reasoning_event_noted_once_not_in_reply(self):
+        chunks = _sse_chunks(
+            {"choices": [{"delta": {"content": "",
+                                    "reasoning": "pensando"}}]},
+            {"choices": [{"delta": {"content": "",
+                                    "reasoning": " mWorking"}}]},
+            _delta("respuesta final"),
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+        )
+        server = SeqServer([chunks])
+        try:
+            client = ProviderClient(base_url=f"http://127.0.0.1:{server.port}",
+                                    api_style="chat")
+            emitted = []
+            history = run_agent(
+                client, [{"role": "user", "content": "di hola"}], model="m1",
+                registry=ToolRegistry(), emit=emitted.append,
+                on_tool=lambda n, a: None)
+            assert history[-1]["content"] == "respuesta final"
+            notes = [t for t in emitted if "razonando" in t]
+            assert notes == ["(🤔 razonando...)"]  # exactly one note
+            assert all("pensando" not in t for t in emitted)
+        finally:
+            server.stop()
+
+    def test_no_reasoning_note_without_reasoning_events(self):
+        server = SeqServer([_chat_final_chunks("simple")])
+        try:
+            client = ProviderClient(base_url=f"http://127.0.0.1:{server.port}",
+                                    api_style="chat")
+            emitted = []
+            run_agent(client, [{"role": "user", "content": "hola"}],
+                      model="m1", registry=ToolRegistry(),
+                      emit=emitted.append, on_tool=lambda n, a: None)
+            assert not any("razonando" in t for t in emitted)
+        finally:
+            server.stop()

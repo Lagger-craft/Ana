@@ -149,3 +149,126 @@ class TestMain:
         out = tmp_path / "ana" / "config.toml"
         assert rc == 0
         assert out.read_text() == CONFIG_TEMPLATE
+
+
+# ------------------------------------------------------ imágenes (T21)
+
+
+class _RecordingFx:
+    """Turn-level client that records every request like the real one."""
+
+    api_style = "chat"
+
+    def __init__(self):
+        self.calls = []
+
+    def stream_turn(self, messages, model, system=None, tools=None):
+        self.calls.append({"messages": [dict(m) for m in messages],
+                           "model": model})
+        if self.calls[-1]["messages"][-1].get("images"):
+            fake_events = [(("✓ imagen vista"),)]
+        return iter([{"type": "text", "content": "ok"},
+                     {"type": "finish", "finish_reason": "stop"}])
+
+
+def _png(tmp_path):
+    p = tmp_path / "pic.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+    return p
+
+
+class TestImageAttachment:
+    def test_user_message_encodes_base64_with_mime(self, tmp_path):
+        import base64
+        from ana.cli import _user_message
+
+        msg = _user_message("mira esto", [_png(tmp_path)])
+        assert msg["content"] == "mira esto"
+        img = msg["images"][0]
+        assert img["media_type"] == "image/png"
+        assert img["data"] == base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode()
+
+
+    def test_rejects_non_image_file_with_actionable_error(self, tmp_path):
+        from ana.cli import _user_message
+
+        bad = tmp_path / "doc.txt"
+        bad.write_text("texto")
+        with pytest.raises(ValueError) as excinfo:
+            _user_message("x", [bad])
+        assert "no es una imagen" in str(excinfo.value)
+        assert "doc.txt" in str(excinfo.value)
+
+    def test_rejects_missing_file(self, tmp_path):
+        from ana.cli import _user_message
+
+        with pytest.raises(ValueError, match="no existe"):
+            _user_message("x", [tmp_path / "fantasma.png"])
+
+    def test_no_images_strips_the_key(self):
+        from ana.cli import _user_message
+
+        assert _user_message("hola", []) == {"role": "user", "content": "hola"}
+
+    def test_img_queues_and_the_next_message_carries_them(self, cfg, tmp_path):
+        img = _png(tmp_path)
+        fx = _RecordingFx()
+
+        def user_of(call):
+            ms = [m for m in call["messages"] if m.get("role") == "user"]
+            return ms[-1]
+
+        run_repl(cfg_path=cfg, lines=[f"/img {img}", "mira",
+                                      "otra cosa", "/exit"],
+                 voice_fx=None, registry=None, client_fx=fx,
+                 tools=True)
+        first = user_of(fx.calls[0])
+        assert first["images"][0]["media_type"] == "image/png"
+        assert first["content"] == "mira"
+        # second turn: queue was cleared by the first send
+        assert "images" not in user_of(fx.calls[1])
+
+    def test_img_without_arg_shows_pending(self, cfg, tmp_path, capsys):
+        img = _png(tmp_path)
+        run_repl(cfg_path=cfg, lines=[f"/img {img}", "/img", "hola", "/exit"],
+                 stream=lambda msgs, model, system=None: iter(["ok"]))
+        out = capsys.readouterr().out
+        assert "pic.png" in out
+
+    def test_img_missing_path_reports_and_sends_nothing(self, cfg, capsys):
+        out_lines = []
+        history = run_repl(cfg_path=cfg, lines=["/img /no/existe.png", "/exit"],
+                           stream=lambda *a, **k: iter(["!"]),
+                           emit=out_lines.append)
+        assert history == []
+        joined = "\n".join(out_lines)
+        assert "no existe" in joined.lower()
+
+
+
+class TestVisionModel:
+    def test_pick_model_returns_vision_model_when_images_present(self):
+        from ana.cli import _model_for_turn
+        from ana.config import Provider
+
+        p = Provider(name="ollama", base_url="http://x/v1",
+                     default_model="qwen3:8b", vision_model="qwen3-vl:4b")
+        assert _model_for_turn(p, None, has_images=True) == "qwen3-vl:4b"
+        assert _model_for_turn(p, None, has_images=False) == "qwen3:8b"
+        # explicit user model always wins
+        assert _model_for_turn(p, "m2", has_images=True) == "m2"
+
+    def test_pick_model_without_vision_model_takes_default(self):
+        from ana.cli import _model_for_turn
+        from ana.config import Provider
+
+        p = Provider(name="x", base_url="http://x/v1", default_model="m1")
+        assert _model_for_turn(p, None, has_images=True) == "m1"
+
+    def test_repl_images_auto_pick_vision_model(self, cfg, tmp_path):
+        # the template ships an ollama vision_model (qwen3-vl:4b)
+        img = _png(tmp_path)
+        fx = _RecordingFx()
+        run_repl(cfg_path=cfg, lines=[f"/img {img}", "mira", "/exit"],
+                 provider_override="ollama", client_fx=fx, tools=True)
+        assert fx.calls[0]["model"] == "qwen3-vl:4b"  # attached → vision

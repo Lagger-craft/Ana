@@ -12,6 +12,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 | **0** ✅ | chat CLI, multi-provider config, streaming |
 | **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
 | **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, opt-in) |
+| **3** ✅ | images: local vision (Repl `/img`, one-shot `--image`), vision_model auto-pick |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
 | 4 | waifu avatar overlay (layer-shell), emotion tags |
 | 5 | Inochi2D rigging via an MCP-driven Inochi Creator (PNG fallback if the spike fails) |
@@ -64,7 +65,26 @@ To let Ana search the web, also export `TAVILY_API_KEY`
 ```
 
 REPL commands: `/exit`, `/new` (clear history), `/model [name]`,
-`/provider [name]`, `/tools [on|off|list]`, `/voice [on|off|status]`.
+`/provider [name]`, `/tools [on|off|list]`, `/voice [on|off|status]`,
+`/img <ruta>` (queue images for the next message).
+
+### Images (Phase 3)
+
+Attach a picture and ask about it, fully local (S4):
+
+```sh
+.venv/bin/ana -m "¿qué se ve en esta captura?" --image captura.png
+# or in the REPL:
+#   /img ~/Screenshots/foo.png     then just type your question
+```
+
+- Images attach to the **next message** (REPL stores them as pending;
+  the queue clears after one send, `/new` clears it too).
+- When a message carries images Ana picks the provider's
+  `vision_model` automatically (template default for ollama:
+  `qwen3-vl:4b`); an explicit `--model` / `/model` still wins.
+- Reasoning models (qwen3*) surface a `(🤔 razonando...)` note while the
+  model thinks, so the prompt never looks frozen.
 
 If a provider rejects the tools payload (e.g. a small local model), Ana
 retries the turn without tools and keeps tools off for the session;

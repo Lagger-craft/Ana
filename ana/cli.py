@@ -12,8 +12,11 @@ Commands inside the REPL:
 from __future__ import annotations
 
 import argparse
+import base64
+import mimetypes
 import sys
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 from . import __version__
 from .agent import AgentError, ToolRegistry, run_agent
@@ -67,6 +70,7 @@ def run_repl(
     voice_secs: float | None = None,
     voice_fx: object | None = None,
     stt: str | None = None,
+    images: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
 
@@ -99,6 +103,7 @@ def run_repl(
     active_registry: ToolRegistry | None = registry
     voice_on = voice
     vfx = voice_fx if voice_fx is not None else _DefaultVoice(stt)
+    pending_images: list[str] = list(images or [])
 
     def press(timeout: float | None = None) -> bool:
         """Push-to-talk click seam: block until Enter (or up to timeout).
@@ -178,6 +183,22 @@ def run_repl(
             elif cmd == "new":
                 history.clear()
                 continue
+            elif cmd in ("img", "image", "imagen"):
+                if not arg:
+                    if pending_images:
+                        emit("imgs pendientes: " + " ".join(pending_images))
+                    else:
+                        emit("no hay imágenes pendientes "
+                             "(usage: /img <ruta>)")
+                else:
+                    try:
+                        _encode_image(arg)  # validate before queueing
+                    except (ValueError, OSError) as exc:
+                        emit(f"error: {exc}")
+                    else:
+                        pending_images.append(arg)
+                        emit(f"(img añadida: {arg})")
+                continue
             elif cmd == "model":
                 if arg:
                     model = arg
@@ -233,10 +254,13 @@ def run_repl(
                 emit(f"unknown command: /{cmd} ({COMMAND_HELP})")
                 continue
 
-        # regular chat turn
+        # regular chat turn: pending images ride this message once
+        attachments = list(pending_images)
+        pending_images.clear()
         turn_state = _do_turn(cfg, provider, models, model, history, line,
                               emit, current_stream, tools_on,
-                              active_registry, client_fx, max_rounds)
+                              active_registry, client_fx, max_rounds,
+                              images=attachments)
         if turn_state == "tools-unavailable":
             tools_on = False  # stay off for the rest of the session
         if (voice_on and turn_state in ("ok", "tools-unavailable")
@@ -306,18 +330,24 @@ class _DefaultVoice:
 
 
 def _do_turn(cfg, provider, models, model, history, line, emit,
-             current_stream, tools_on, active_registry, client_fx, max_rounds):
+             current_stream, tools_on, active_registry, client_fx, max_rounds,
+             images=None):
     """Execute one chat turn with tools (or a plain stream fallback).
 
     ``client_fx`` (test/adapter object) is the turn-level client for both
     paths when given. On a provider rejection of the tools payload
     (HTTP 4xx), the turn retries once without tools; the caller disables
     tools for the rest of the session. Any failure rolls the whole
-    user turn out of history.
+    user turn out of history. ``images`` (pending attachments) ride on
+    this user message once and then leave history untouched.
     """
+    has_images = bool(images)
     base_len = len(history)
-    history.append({"role": "user", "content": line})
-    active_model = model or _default_model(cfg, provider, models)
+    history.append(_user_message(line, images))
+    active_model = _model_for_turn(
+        cfg.provider(provider), model, has_images=has_images,
+        fallback=(None if model is not None
+                  else _default_model(cfg, provider, models)) or "")
     system = cfg.system_prompt or None
     used_tools = tools_on and active_registry is not None and len(active_registry)
     try:
@@ -383,6 +413,47 @@ def _default_registry() -> ToolRegistry:
     return build_default_tools()
 
 
+def _encode_image(file_path: str | Path) -> dict:
+    """File path -> {media_type, data(base64)} for a message image.
+
+    Raises ValueError with an actionable message when the path is not an
+    image (magic check is suffix-based) or does not exist.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise ValueError(f"la imagen no existe: {path}")
+    mime, _ = mimetypes.guess_type(str(path))
+    if not mime or not mime.startswith("image/"):
+        suffix = path.suffix or "(sin extensión)"
+        raise ValueError(
+            f"{path.name} ({suffix}) no es una imagen soportada "
+            "(png, jpg, webp, gif...)")
+    return {"media_type": mime, "data": base64.b64encode(
+        path.read_bytes()).decode("ascii")}
+
+
+def _user_message(text: str, image_paths) -> dict:
+    """The user turn dict; images attach only when paths are pending."""
+    if image_paths:
+        return {"role": "user", "content": text,
+                "images": [_encode_image(p) for p in image_paths]}
+    return {"role": "user", "content": text}
+
+
+def _model_for_turn(provider: Provider, explicit: str | None,
+                    has_images: bool, fallback: str = "") -> str:
+    """Model id for one turn: explicit > vision_model (images) > fallback.
+
+    ``fallback`` preserves the /model and config-level override order the
+    plain-text path already had (it defaults to provider.default_model).
+    """
+    if explicit:
+        return explicit
+    if has_images and provider.vision_model:
+        return provider.vision_model
+    return fallback or provider.default_model
+
+
 def _default_model(cfg: Config, provider_name: str, models: dict[str, str] | None) -> str:
     if models and provider_name in models:
         return models[provider_name]
@@ -423,7 +494,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stt", choices=("voxtype", "whisper"),
                         help="STT backend for --voice; default voxtype "
                              "(same engine as local dictation), "
-                             "$ANA_STT also works")
+                             "ANA_STT also works")
+    parser.add_argument("--image", "-i", action="append", metavar="RUTA",
+                        help="image to attach to -m (png/jpg/webp/gif); "
+                             "the provider's vision_model is used for it")
 
     args = parser.parse_args(argv)
 
@@ -445,19 +519,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.message:
             cfg = load_config(cfg_path)
             p = cfg.provider(args.provider)
-            model = args.model or p.default_model
+            attached = args.image or []
+            user_msg = _user_message(args.message, attached)
+            model = args.model or (
+                p.vision_model if attached and p.vision_model
+                else p.default_model)
             try:
                 if args.no_tools:
                     stream = build_stream(cfg, p)
-                    for text in stream([{ "role": "user",
-                                          "content": args.message}],
+                    for text in stream([user_msg],
                                        model, system=cfg.system_prompt or None):
                         print(text, end="", flush=True)
                     print()
                 else:
                     run_agent(
                         _turn_client(cfg, args.provider),
-                        [{"role": "user", "content": args.message}],
+                        [user_msg],
                         model, _default_registry(),
                         emit=lambda t: print(t, end="", flush=True),
                         system=cfg.system_prompt or None,
@@ -475,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
             tools=not args.no_tools,
             voice=args.voice,
             stt=args.stt,
+            images=args.image or [],
         )
         return 0
     except ConfigError as exc:

@@ -69,6 +69,9 @@ base_url = "http://127.0.0.1:11434/v1"
 api_style = "chat"
 api_key_env = ""
 default_model = "qwen2.5-coder:1.5b"
+# Model used when you attach images (vision). Leave it empty to always
+# use default_model for everything.
+vision_model = "qwen3-vl:4b"
 '''
 
 
@@ -83,6 +86,7 @@ class Provider:
     api_style: str = "chat"
     api_key_env: str | None = None
     default_model: str = ""
+    vision_model: str | None = None  # used automatically when images are attached
 
     def __post_init__(self) -> None:
         if self.api_style not in VALID_API_STYLES:
@@ -158,7 +162,8 @@ def load_config(path: str | Path) -> Config:
     providers_block = data.get("providers", {})
     providers: dict[str, Provider] = {}
     for name, raw in providers_block.items():
-        known_prov = {"base_url", "api_style", "api_key_env", "default_model"}
+        known_prov = {"base_url", "api_style", "api_key_env",
+                      "default_model", "vision_model"}
         if not isinstance(raw, dict):
             raise ConfigError(f"{path}: provider '{name}' must be a table")
         bad = sorted(set(raw) - known_prov)
@@ -171,6 +176,7 @@ def load_config(path: str | Path) -> Config:
             api_style=str(raw.get("api_style", "chat")),
             api_key_env=raw.get("api_key_env") or None,
             default_model=str(raw.get("default_model", "")),
+            vision_model=raw.get("vision_model") or None,
         )
 
     cfg = Config(

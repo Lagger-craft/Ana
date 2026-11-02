@@ -194,3 +194,133 @@ class TestAnthropic:
                     [{"role": "user", "content": "hi"}], model="claude"))
         finally:
             server.stop()
+
+
+# --------------------------------------------------- multimodal (T20)
+
+
+def _img(media_type="image/png", data="QUJD"):
+    return {"media_type": media_type, "data": data}
+
+
+class TestMultimodalImages:
+    def test_chat_request_builds_image_url_parts_and_strips_images_key(
+            self, chat_server):
+        client = make_chat_client(chat_server)
+        messages = [{"role": "user", "content": "mira",
+                     "images": [_img()]}]
+        list(client.stream_chat(messages, model="m1"))
+        sent = json.loads(chat_server.last_body)
+        assert sent["stream"] is True  # control: normal request succeeded
+        msg = sent["messages"][0]
+        assert "images" not in msg  # provider-facing key is stripped
+        assert msg["content"][0] == {"type": "text", "text": "mira"}
+        assert msg["content"][1]["type"] == "image_url"
+        assert msg["content"][1]["image_url"] == {
+            "url": "data:image/png;base64,QUJD"}
+
+    def test_chat_request_keeps_plain_messages_untouched(self, chat_server):
+        client = make_chat_client(chat_server)
+        list(client.stream_chat([{"role": "user", "content": "hola"}],
+                                model="m1"))
+        assert json.loads(chat_server.last_body)["messages"] == [
+            {"role": "user", "content": "hola"}]
+
+    def test_anthropic_request_builds_base64_source_parts(self):
+        body = _anthropic_chunks("ba", "ba")
+        server = FakeServer(lambda p: (
+            200, "text/event-stream", body,
+            {}) if p == "/messages" else (404, "t", b"", {}))
+        try:
+            client = ProviderClient(
+                base_url=f"http://127.0.0.1:{server.port}",
+                api_style="anthropic", api_key="sk-ant")
+            messages = [{"role": "user", "content": "mira",
+                         "images": [_img(media_type="image/jpeg",
+                                         data="WFla")]}]
+            list(client.stream_chat(messages, model="m1"))
+            sent = json.loads(server.last_body)
+        finally:
+            server.stop()
+        msg = sent["messages"][0]
+        assert msg["content"][0] == {"type": "text", "text": "mira"}
+        assert msg["content"][1]["type"] == "image"
+        assert msg["content"][1]["source"] == {
+            "type": "base64", "media_type": "image/jpeg", "data": "WFla"}
+
+
+class TestReasoningDeltas:
+    def test_chat_reasoning_delta_yields_reasoning_event_and_not_text(self):
+        body = _sse_chunks(
+            {"choices": [{"delta": {"content": "", "reasoning": "hmm"}}]},
+            {"choices": [{"delta": {"reasoning": "ora"}}]},
+            _delta("p evidently"),
+        )
+        server = FakeServer(lambda p: (
+            200, "text/event-stream", body,
+            {}) if p == "/chat/completions" else (404, "t", b"", {}))
+        try:
+            client = make_chat_client(server)
+            events = list(client.stream_turn(
+                [{"role": "user", "content": "hi"}], model="m1"))
+            assert [e["type"] for e in events] == [
+                "reasoning", "reasoning", "text", "finish"]
+            assert events[0]["content"] == "hmm"
+            assert events[2]["content"] == "p evidently"
+        finally:
+            server.stop()
+
+    def test_chat_reasoning_content_field_also_yields_events(self):
+        body = _sse_chunks(
+            {"choices": [{"delta": {"reasoning_content": "pienso"}}]},
+        )
+        server = FakeServer(lambda p: (
+            200, "text/event-stream", body,
+            {}) if p == "/chat/completions" else (404, "t", b"", {}))
+        try:
+            client = make_chat_client(server)
+            events = list(client.stream_turn(
+                [{"role": "user", "content": "hi"}], model="m1"))
+            reasoning = [e for e in events if e["type"] == "reasoning"]
+            assert reasoning == [{"type": "reasoning", "content": "pienso"}]
+        finally:
+            server.stop()
+
+    def test_anthropic_thinking_delta_yields_reasoning_event(self):
+        lines = [
+            "event: content_block_start\ndata: " + json.dumps({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking"},
+            }) + "\n\n",
+            "event: content_block_delta\ndata: " + json.dumps({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta",
+                          "thinking": "dame un segundo"},
+            }) + "\n\n",
+            "event: content_block_stop\ndata: " + json.dumps(
+                {"type": "content_block_stop", "index": 0}) + "\n\n",
+            "event: content_block_start\ndata: " + json.dumps({
+                "type": "content_block_start", "index": 1,
+                "content_block": {"type": "text"},
+            }) + "\n\n",
+            "event: content_block_delta\ndata: " + json.dumps({
+                "type": "content_block_delta", "index": 1,
+                "delta": {"type": "text_delta", "text": "respuesta"},
+            }) + "\n\n",
+        ]
+        body = ("".join(lines) + "event: message_stop\n"
+                'data: {"type":"message_stop"}\n\n').encode()
+        server = FakeServer(lambda p: (
+            200, "text/event-stream", body,
+            {}) if p == "/messages" else (404, "t", b"", {}))
+        try:
+            client = ProviderClient(
+                base_url=f"http://127.0.0.1:{server.port}",
+                api_style="anthropic", api_key="k")
+            events = list(client.stream_turn(
+                [{"role": "user", "content": "hi"}], model="m1"))
+            kinds = [e["type"] for e in events if e["type"] != "finish"]
+            assert kinds[0] == "reasoning"
+            assert kinds[1] == "text"
+        finally:
+            server.stop()

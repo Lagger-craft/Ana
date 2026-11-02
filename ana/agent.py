@@ -97,11 +97,18 @@ def run_agent(
     for _round in range(max_rounds):
         reply_text: list[str] = []
         calls: list[dict] = []
+        reasoning_noted = False
         for event in client.stream_turn(messages, model, system=system,
                                         tools=tools):
             if event["type"] == "text":
                 reply_text.append(event["content"])
                 emit(event["content"])
+            elif event["type"] == "reasoning":
+                if not reasoning_noted:
+                    # reasoning models stream thinking silently for seconds;
+                    # one note prevents the "frozen prompt" feeling
+                    reasoning_noted = True
+                    emit("(🤔 razonando...)")
             elif event["type"] == "tool_call":
                 calls.append(event)
             elif event["type"] == "finish":
