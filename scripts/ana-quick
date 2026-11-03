@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Ana quick launcher: bring up the waifu overlay (only if it is not
 # already running) and open the chat TUI in the default terminal.
-# Bound to SUPER+A in ~/.config/hypr/bindings.lua (S15/T33).
+# Bound to SUPER+A in ~/.config/hypr/bindings.lua (S15/T33); for
+# labwc/KDE/Niri the same script is bound in that compositor's config.
 #
 # Single overlay instance matters: two FIFO readers would split every
 # say/state event between them and the subtitle would flicker randomly.
@@ -19,5 +20,28 @@ if ! pgrep -f '^python3 -m ana\.overlay|bin/ana waifu$' >/dev/null 2>&1; then
     (nohup "$ANA" waifu >/tmp/ana-waifu.log 2>&1 </dev/null &)
 fi
 
-# replace this process with the terminal running the TUI
-exec xdg-terminal-exec "$ANA" tui
+# replace this process with the terminal running the TUI.
+# xdg-terminal-exec first (any desktop with xdg-utils), then a known
+# terminal: fresh installs (Void/labwc) often lack xdg-terminal-exec.
+launch_term() {
+    # $1 = binary, rest = argv prefix that must end with "$ANA" tui
+    local bin="$1"; shift
+    exec "$bin" "$@" "$ANA" tui
+}
+if command -v xdg-terminal-exec >/dev/null 2>&1; then
+    exec xdg-terminal-exec "$ANA" tui
+fi
+for term in foot alacritty kitty ghostty wezterm xterm; do
+    if command -v "$term" >/dev/null 2>&1; then
+        launch_term "$term"
+    fi
+done
+# argv-style terminals (each needs its own separator flag)
+if command -v gnome-terminal >/dev/null 2>&1; then
+    launch_term gnome-terminal --
+elif command -v konsole >/dev/null 2>&1; then
+    launch_term konsole -e
+fi
+
+echo "ana-quick: no terminal emulator found (install xdg-utils or one of: foot, alacritty, kitty, ghostty, wezterm, konsole)" >&2
+exit 127

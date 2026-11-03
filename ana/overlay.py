@@ -116,6 +116,21 @@ def _reexec_system_python() -> "NoReturn":
              *sys.argv[1:])
 
 
+def layer_shell_lib(root: str = "/usr/lib") -> str | None:
+    """Path of libgtk4-layer-shell for the LD_PRELOAD re-exec, or None.
+
+    Arch ships the development symlink `libgtk4-layer-shell.so`;
+    runtime-only installs (Void/labwc) often ship only the soname
+    `.so.0`. Try both, then give up — the caller then reports the
+    missing protocol instead of silently skipping the re-exec.
+    """
+    for name in ("libgtk4-layer-shell.so", "libgtk4-layer-shell.so.0"):
+        candidate = os.path.join(root, name)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def run_overlay() -> int:
     """Entry: Gtk4 layer-shell surface driven by JSON on stdin."""
     try:
@@ -126,11 +141,11 @@ def run_overlay() -> int:
         if not Gtk4LayerShell.is_supported():
             # libgtk4-layer-shell must load BEFORE libwayland-client;
             # the known fix is LD_PRELOAD — set it and re-exec once.
-            lib = "/usr/lib/libgtk4-layer-shell.so"
-            if os.path.exists(lib) and not os.environ.get("_ANA_LAYER_PRELOAD"):
+            lib = layer_shell_lib()
+            if lib and not os.environ.get("_ANA_LAYER_PRELOAD"):
                 os.environ["_ANA_LAYER_PRELOAD"] = "1"
-                preload = {lib: 1}
-                os.environ["LD_PRELOAD"] = os.environ.get("LD_PRELOAD", "") +                     f"{os.pathsep}{lib}"
+                os.environ["LD_PRELOAD"] = os.environ.get("LD_PRELOAD", "") + \
+                    f"{os.pathsep}{lib}"
                 _reexec_system_python()
             print("error: the compositor does not support the layer-shell "
                   "protocol (requires a Wayland session)",

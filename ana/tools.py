@@ -62,10 +62,28 @@ def _tavily_search(args: dict) -> str:
 
 
 def _hyprctl_reader(subcommand: str):
+    """Read-only hyprctl query that DEGRADES outside Hyprland.
+
+    run_agent only traps AgentError, so any OSError here (no hyprctl on
+    labwc/KDE/Niri, PATH stripped) or TimeoutExpired (hung compositor
+    socket) would kill the whole turn. Both become an answer string the
+    model can read and stop retrying.
+    """
     def reader(args: dict) -> str:
-        proc = subprocess.run(
-            ["hyprctl", subcommand, "-j"], capture_output=True, text=True,
-            timeout=10, check=False)
+        try:
+            proc = subprocess.run(
+                ["hyprctl", subcommand, "-j"], capture_output=True,
+                text=True, timeout=10, check=False)
+        except FileNotFoundError:
+            return ("hyprctl unavailable: no Hyprland session on this "
+                    "desktop (Wayland compositor without hyprctl) — do "
+                    "not retry this tool")
+        except subprocess.TimeoutExpired:
+            return (f"hyprctl unavailable: `hyprctl {subcommand} -j` "
+                    "timed out after 10s — do not retry this tool")
+        except OSError as exc:
+            return (f"hyprctl unavailable: {exc.__class__.__name__}: "
+                    f"{exc} — do not retry this tool")
         out = (proc.stdout or proc.stderr or "").strip()
         return out if proc.returncode == 0 else f"hyprctl error: {out}"
     return reader

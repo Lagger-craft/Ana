@@ -91,6 +91,32 @@ class TestHyprctl:
         assert result == "hyprctl info"
         assert ran == [["hyprctl", "workspaces", "-j"]]
 
+    def test_missing_hyprctl_degrades_to_message(self, tools, monkeypatch,
+                                                 tmp_path):
+        """No Hyprland (labwc/KDE/Niri): the tool MUST answer a string,
+        never raise — run_agent only traps AgentError, so an OSError here
+        kills the whole turn.
+        """
+        monkeypatch.setenv("PATH", str(tmp_path))  # hyprctl no existe
+        result = tools.call("hypr_monitors", {})
+        assert isinstance(result, str)
+        assert "hyprctl" in result
+        assert "unavailable" in result.lower() or "no disponible" in result
+
+    def test_timeout_degrades_to_message(self, tools, monkeypatch):
+        """A hung hyprctl must not kill the turn either (TimeoutExpired is
+        a SubprocessError, not an AgentError)."""
+        import subprocess
+        import ana.tools as tools_mod
+
+        def fake_run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+
+        monkeypatch.setattr(tools_mod.subprocess, "run", fake_run)
+        result = tools.call("hypr_devices", {})
+        assert isinstance(result, str)
+        assert "hyprctl" in result
+
     def test_no_log_too_deep_flag_allowlist(self, tools, monkeypatch, capsys):
         assert "hypr_dispatch" not in tools.names()  # destructive, not present
         assert "hypr_kill" not in tools.names()

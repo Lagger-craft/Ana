@@ -188,6 +188,33 @@ o.bind("SUPER + ALT + A", "Ana hablar", "/home/<you>/Projects/Ana/.venv/bin/ana 
   documented under [Global voice hotkey](#global-voice-hotkey--ana-talk-s15c))
   — no window needs focus.
 
+#### Other compositors (labwc, Niri, KDE…)
+
+Ana runs on any Wayland compositor with `wlr-layer-shell` (that is what
+the overlay needs); outside Hyprland the `hypr_*` agent tools answer
+`hyprctl unavailable: …` instead of the compositor state, and everything
+else keeps working. Same two shortcuts, bound in the compositor's own
+config — for labwc (`~/.config/rc.xml`):
+
+```xml
+<keyboard>
+  <keybind key="W-a">
+    <action name="Execute" command="/home/<you>/Projects/Ana/scripts/ana-quick"/>
+  </keybind>
+  <keybind key="W-A-a">
+    <action name="Execute" command="/home/<you>/Projects/Ana/.venv/bin/ana talk"/>
+  </keybind>
+</keyboard>
+```
+
+- KDE Plasma: *Ajustes → Atajos de teclado → Comandos personalizados*.
+- Niri (`config.kdl`): `Mod+A { spawn "…/scripts/ana-quick"; }`.
+- X11 sessions (Xfce, MATE, LXQt, IceWM) are **not** supported: the
+  overlay is a layer-shell surface and has no X11 backend.
+- `scripts/ana-quick` opens the TUI with `xdg-terminal-exec`, falling
+  back to foot/alacritty/kitty/ghostty/wezterm/xterm/gnome-terminal/
+  konsole when that helper is missing.
+
 ## Voice (Phase 2)
 
 Bidirectional voice, **fully local** (S9/S10): voxtype for
