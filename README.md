@@ -1,21 +1,24 @@
-# Ana — waifu virtual assistant for Hyprland/Linux
+# Ana — waifu virtual assistant for Linux (Wayland)
 
-Ana is a personal AI assistant for Arch Linux (Omarchy + Hyprland). This is
-**Phase 0**: a streaming chat CLI that talks to cloud providers (OpenAI,
-Anthropic, OpenCode Go, Xiaomi MiMo) or a local Ollama, driven by a TOML
-config with API keys kept out of the file (env vars only).
+Ana is a personal AI assistant, tested daily on **Void Linux + KDE
+Plasma 6 (Wayland, kwin_wayland)**. Arch Linux (Omarchy + Hyprland),
+labwc and Niri remain supported as alternative compositor targets —
+see [Keyboard shortcuts](#keyboard-shortcuts-s15). It began as
+**Phase 0**, a streaming chat CLI that talks to cloud providers
+(OpenAI, Anthropic, OpenCode Go, Xiaomi MiMo) or a local Ollama, driven
+by a TOML config with API keys kept out of the file (env vars only).
 
 The full roadmap lives in `odd/tasks/assistant-core.md`:
 
 | Phase | Scope |
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
-| **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
-| **2** ✅ | voice loop: local STT (voxtype) + TTS — Kokoro default, Piper optional (on by default) |
+| **1** ✅✨ | tool-calling: Tavily web search, `hypr_*` read-only queries (`hyprctl unavailable` outside Hyprland), system info, graceful no-tools fallback |
+| **2** ✅ | voice loop: local STT (voxtype) + TTS — Kokoro default, Piper optional; voice ON by default (`--no-voice` to opt out) |
 | **3** ✅ | images: local vision (Repl `/img`, one-shot `--image`), vision_model auto-pick |
 | **4** ✅ | TUI (Textual): full-screen chat, same turn engine; opt-in `.tui` extra |
-| 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
-| 4 | waifu avatar overlay (layer-shell), emotion tags |
+| **4** ✅ | waifu avatar overlay (layer-shell) — see [Waifu overlay art](#waifu-overlay-art) |
+| 4 | emotion tags (overlay reactions) |
 | 5 | Inochi2D rigging via an MCP-driven Inochi Creator (PNG fallback if the spike fails) |
 | 6 | camera, local-only for privacy |
 
@@ -84,8 +87,9 @@ REPL — the TUI is a frontend, not a fork.
 - Chat panel streams the same reply texts; the status bar shows model,
   provider, tools state and the pending-image count.
 - Commands: `/model [name]`, `/provider [name]`, `/new`, `/img <ruta>`,
-  `/exit` (Ctrl+Q also quits). Voice rounds stay in the REPL/CLI for
-  now; the TUI gets its own voice UX later.
+  `/voice [on|off|status]`, `/exit` (Ctrl+Q also quits). Voice is on by
+  default: an empty Enter is push-to-talk, and `--stt`/`--tts` select
+  the backends exactly like in the REPL.
 - Headless-safe tests run through Textual's pilot (`tests/test_tui.py`).
 
 ### Images (Phase 3)
@@ -129,7 +133,7 @@ it calls the tool), `system_info`, `web_search` (Tavily key) and Ana's
 own memory tools `memory_save` / `memory_search` (Engram — see
 [Memory (Engram)](#memory-engram)).
 
-### TUI (Phase 4)
+### Local examples (no cloud)
 
 Example, fully local (no cloud involved):
 
@@ -161,11 +165,15 @@ Requires ImageMagick + `pip install rembg onnxruntime` (model downloads
 on first run; the waifu shows idle when blink.png is absent).
 Knobs: `$ANA_WAIFU_MONITOR` pins the output (default: NOT the avoid
 one; `$ANA_WAIFU_AVOID`, default DP-1 for the gaming screen),
-`$ANA_WAIFU_SIZE` (px edge, default 220), `$ANA_WAIFU_BLINK"
-2:80". Events: JSON lines on the FIFO — `say` sets the subtitle,
+`$ANA_WAIFU_SIZE` (px edge, default 220), `$ANA_WAIFU_BLINK`
+(`<seconds>:<ms>`, default 4 s / 150 ms). Events: JSON lines on the
+FIFO — `say` sets the subtitle,
 `state` swaps idle/talk/blink, `quit` closes the window. The REPL and
 the TUI send `quit` when they exit, so the overlay closes with the chat
-and `scripts/ana-quick` reopens a fresh one next time.
+and `scripts/ana-quick` reopens a fresh one next time. `ana talk`
+rounds do NOT send `quit` — the headless round has no chat window to
+close, so the overlay stays up across hotkey rounds (the TUI/REPL
+still close it on exit).
 
 **Who sends them:** every frontend that talks to Ana — both `ana tui`
 and the classic REPL (`ana`) push each reply as a `say` event, and voice
@@ -174,8 +182,31 @@ so the waifu reacts the same way no matter where you chat.
 
 ### Keyboard shortcuts (S15)
 
-Two Hyprland bindings (Omarchy: `~/.config/hypr/bindings.lua`),
-adjust the paths to your clone:
+Two global shortcuts, currently bound on **KDE Plasma 6** — the
+environment this project is tested on today. Both are *command
+shortcuts* registered in System Settings → Shortcuts (search for
+"Ana"); to rebind one, select it there and press the new key combo
+(Plasma 6 stores command shortcuts in `~/.config/kglobalshortcutsrc`
+under `[services]`, but the GUI is how you edit them):
+
+- **`Meta+A` → "Ana — Abrir"** runs `scripts/ana-quick`: it starts
+  `ana waifu` **only if no overlay is already live** (anchored
+  `pgrep`, so a second instance never splits the FIFO events) and
+  opens the TUI in your default terminal.
+- **`Meta+Alt+A` → "Ana — Hablar"** runs `scripts/ana-talk-hotkey`,
+  a thin wrapper built for the shortcut: it prepends `~/.local/bin`
+  to `PATH` (kglobalaccel starts it from `kwin_wayland`, whose PATH
+  has no `voxtype`), brings the waifu overlay up if it isn't running,
+  then execs `ana talk` — the headless voice round documented under
+  [Global voice hotkey](#global-voice-hotkey--ana-talk-s15c)
+  (two-press toggle, capped by `ANA_VOICE_MAX_SECONDS`). No window
+  needs focus.
+
+#### Alternative compositors (Hyprland, labwc, Niri)
+
+The same two scripts bind in the compositor's own config. On Hyprland
+(Omarchy: `~/.config/hypr/bindings.lua`), adjust the paths to your
+clone:
 
 ```lua
 -- overlay (if not already running) + chat TUI, one key
@@ -184,21 +215,18 @@ o.bind("SUPER + A", "Ana waifu", "/home/<you>/Projects/Ana/scripts/ana-quick")
 o.bind("SUPER + ALT + A", "Ana hablar", "/home/<you>/Projects/Ana/.venv/bin/ana talk")
 ```
 
-- `SUPER + A` runs `scripts/ana-quick`: it starts `ana waifu` **only if
-  no overlay is already live** (anchored `pgrep`, so a second instance
-  never splits the FIFO events) and opens the TUI in your default
-  terminal.
-- `SUPER + ALT + A` runs the headless voice round (`ana talk`,
-  documented under [Global voice hotkey](#global-voice-hotkey--ana-talk-s15c))
+- `SUPER + A` runs `scripts/ana-quick` — the same script the KDE
+  **Ana — Abrir** shortcut runs.
+- `SUPER + ALT + A` runs `ana talk` directly; on KDE the **Ana —
+  Hablar** shortcut goes through `scripts/ana-talk-hotkey` instead
+  (that wrapper works in any compositor config). Either way it is the
+  headless voice round under [Global voice hotkey](#global-voice-hotkey--ana-talk-s15c)
   — no window needs focus.
-
-#### Other compositors (labwc, Niri, KDE…)
 
 Ana runs on any Wayland compositor with `wlr-layer-shell` (that is what
 the overlay needs); outside Hyprland the `hypr_*` agent tools answer
 `hyprctl unavailable: …` instead of the compositor state, and everything
-else keeps working. Same two shortcuts, bound in the compositor's own
-config — for labwc (`~/.config/rc.xml`):
+else keeps working. For labwc (`~/.config/rc.xml`):
 
 ```xml
 <keyboard>
@@ -211,7 +239,6 @@ config — for labwc (`~/.config/rc.xml`):
 </keyboard>
 ```
 
-- KDE Plasma: *Ajustes → Atajos de teclado → Comandos personalizados*.
 - Niri (`config.kdl`): `Mod+A { spawn "…/scripts/ana-quick"; }`.
 - X11 sessions (Xfce, MATE, LXQt, IceWM) are **not** supported: the
   overlay is a layer-shell surface and has no X11 backend.
@@ -279,7 +306,8 @@ pair is pinned. The group is **not** installed by default.
 
 Besides the Python packages you need:
 
-- `arecord` for mic capture — `sudo pacman -S alsa-utils`
+- `arecord` for mic capture — Arch/Omarchy: `sudo pacman -S alsa-utils`,
+  Void: `sudo xbps-install -S alsa-utils`
   (the `pw-record` alternative from PipeWire is mentioned in the error)
 - `paplay` for playback (PipeWire/PulseAudio, default on Omarchy);
   `aplay` is used as fallback
@@ -355,15 +383,26 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
 ### Global voice hotkey — `ana talk` (S15c)
 
 A headless voice round with **no window and no terminal focus**, so a
-Hyprland keybinding can talk to Ana from anywhere:
+global keybinding can talk to Ana from anywhere. On KDE Plasma it is
+the **Ana — Hablar** command shortcut (`Meta+Alt+A`, rebind in System
+Settings → Shortcuts), which executes:
 
 ```sh
-# ~/.config/hypr/bindings.lua (Omarchy) — adjust the venv path
+# what the "Ana — Hablar" shortcut runs
+/home/<you>/Projects/Ana/scripts/ana-talk-hotkey
+# (PATH += ~/.local/bin for voxtype → ensure waifu overlay → exec `ana talk`)
+```
+
+On Hyprland (Omarchy) the same round binds directly in
+`~/.config/hypr/bindings.lua`:
+
+```sh
 bind = SUPER ALT, A, exec, /home/<you>/Projects/Ana/.venv/bin/ana talk
 ```
 
-Hyprland fires on key **press** only (no release), so this is a
-two-press toggle, not hold-to-talk:
+Global bindings fire on key **press** only (no release) — KDE command
+shortcuts and Hyprland alike — so this is a two-press toggle, not
+hold-to-talk:
 
 - **press 1** (no active round) → notify “🎙 grabando… (otra vez el
   atajo para cortar)”, then record the mic — auto-stops at
@@ -413,6 +452,15 @@ lines, or an honest "no encontré recuerdos..." when nothing matches.
 prepended to the system prompt — the REPL, `-m` one-shot and the TUI
 all share the same turn engine, and the context is fetched at most
 once per process.
+
+`memory_save` treats the `title` as a natural key: saving a title that
+already exists (matched ignoring case and surrounding whitespace)
+updates that record in place (`PATCH /observations/{id}?expected_project=…`)
+instead of creating a duplicate — the confirmation reads
+`actualizado: <title>` rather than `guardado: <title>`. Ana's system
+prompt reinforces this: when you state, correct or retract a durable
+personal fact, she calls `memory_save` with the SAME title in that same
+turn, so one topic stays one record.
 
 Knobs (all optional):
 
