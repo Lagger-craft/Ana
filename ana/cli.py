@@ -24,7 +24,7 @@ from pathlib import Path
 from . import __version__
 from . import memory
 from .agent import AgentError, ToolRegistry, run_agent
-from .client import ProviderClient, ProviderError
+from .client import ProviderClient, ProviderError, probe_fallback
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
 from .tools import build_default_tools
 from .voice import VoiceError
@@ -604,6 +604,47 @@ def _switchable(cfg: Config, provider_name: str) -> StreamFn:
     return switchable
 
 
+def _free_tier_probe(cfg: Config, provider_name: str) -> str | None:
+    """Network seam for the startup free-tier probe.
+
+    Tests patch THIS instead of hitting the network; the
+    PYTEST_CURRENT_TEST guard (same pattern as ana.memory) keeps any
+    unpatched test run off the real endpoints.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return None
+    return probe_fallback(cfg, provider_name)
+
+
+def _session_fallback(cfg_path, provider_arg: str | None) -> str | None:
+    """Startup free-tier probe: fallback provider name, or None.
+
+    ``main()`` calls this exactly once per process, before dispatching
+    any provider-using frontend (never per turn), and never when the
+    user chose ``--provider`` on the command line (their explicit
+    choice wins). Returns the fallback provider name only when the
+    effective provider declares one AND the probe reports a fallback
+    reason; on a switch it prints ONE stderr warning line. Config
+    problems are swallowed here on purpose: they belong to the
+    frontend's own path, which reports them exactly as before.
+    """
+    if provider_arg is not None:
+        return None  # explicit user choice: respect it, never probe
+    try:
+        cfg = load_config(cfg_path)
+        effective = cfg.provider(provider_arg)  # None -> default_provider
+        if not effective.fallback_provider:
+            return None
+        reason = _free_tier_probe(cfg, effective.name)
+    except ConfigError:
+        return None
+    if not reason:
+        return None  # healthy or transient: stay on the provider
+    print(f"({effective.name} no responde como gratis: {reason} — "
+          f"usando {effective.fallback_provider})", file=sys.stderr)
+    return effective.fallback_provider
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ana",
@@ -663,10 +704,17 @@ def main(argv: list[str] | None = None) -> int:
         cfg_path = default_config_path()
 
     stream_fn_provider = args.provider
+    # Free-tier startup probe: once per process, before any frontend
+    # that uses a provider. `init` returned above; `waifu` only draws a
+    # PNG overlay (an -m riding along does use a provider, so probe).
+    fallback = None
+    if args.message or args.command != "waifu":
+        fallback = _session_fallback(cfg_path, args.provider)
+    selected = args.provider or fallback
     try:
         if args.message:
             cfg = load_config(cfg_path)
-            p = cfg.provider(args.provider)
+            p = cfg.provider(selected)
             attached = args.image or []
             user_msg = _user_message(args.message, attached)
             model = args.model or (
@@ -681,7 +729,7 @@ def main(argv: list[str] | None = None) -> int:
                     print()
                 else:
                     run_agent(
-                        _turn_client(cfg, args.provider),
+                        _turn_client(cfg, selected),
                         [user_msg],
                         model, _default_registry(),
                         emit=lambda t: print(t, end="", flush=True),
@@ -708,6 +756,9 @@ def main(argv: list[str] | None = None) -> int:
                 # only an explicit --tts rides along: run_talk keeps a
                 # minimal (path, stt) call contract for its wrappers
                 talk_kw["tts"] = args.tts
+            if selected is not None:
+                # session fallback (or explicit --provider) for the turn
+                talk_kw["provider"] = selected
             return run_talk(cfg_path, **talk_kw)
 
         if args.tui or args.command == "tui":
@@ -716,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             run_tui(
                 cfg_path,
                 model_override=args.model,
-                provider_override=args.provider,
+                provider_override=selected,
                 tools=not args.no_tools,
                 voice=args.voice,
                 stt=args.stt,
@@ -728,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         history = run_repl(
             cfg_path,
             model_override=args.model,
-            provider_override=args.provider,
+            provider_override=selected,
             tools=not args.no_tools,
             voice=args.voice,
             stt=args.stt,

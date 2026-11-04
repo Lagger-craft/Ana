@@ -200,7 +200,8 @@ def _make_emit():
 
 
 def run_talk(cfg_path, stt: str | None = None, tts: str | None = None,
-             voice_fx=None, notify_fn=None, emit=None) -> int:
+             provider: str | None = None, voice_fx=None, notify_fn=None,
+             emit=None) -> int:
     """One ``ana talk`` invocation: toggle, record, turn, notify.
 
     Returns 0 on every normal path (fresh round, stop request, answering
@@ -208,6 +209,11 @@ def run_talk(cfg_path, stt: str | None = None, tts: str | None = None,
     ``notify_fn`` are the test seams; the defaults are the live
     ``_DefaultVoice`` (T18 media pause, voxtype STT, Kokoro TTS via
     ``build_tts``) and ``notify``.
+
+    ``provider`` is forwarded to ``run_repl`` as ``provider_override``
+    (the startup probe's session fallback, or an explicit
+    ``--provider``); default None keeps every existing call and test
+    byte-identical.
     """
     notify_fn = notify_fn or notify
     state = read_state()
@@ -256,6 +262,7 @@ def run_talk(cfg_path, stt: str | None = None, tts: str | None = None,
         # run_repl (T34) — talk.py never forks its own turn path.
         history = run_repl(cfg_path, lines=[heard, "/exit"], voice=True,
                            voice_fx=vfx, emit=emit_fn,
+                           provider_override=provider,
                            close_overlay=False)
         if history and history[-1].get("role") == "assistant":
             notify_fn("Ana", str(history[-1].get("content", ""))[:120])

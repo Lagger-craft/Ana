@@ -462,3 +462,149 @@ class TestSystemPromptMemoryRule:
         monkeypatch.setattr(memory, "session_context", lambda: "CTX-FAKE")
         prompt = _system_prompt(load_config(cfg))
         assert self.RULE in prompt
+
+
+# ------------------------------------- free-tier startup probe wiring
+
+
+def _fallback_config(tmp_path) -> Path:
+    """Config whose default provider declares a fallback."""
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'default_provider = "beam"\n\n'
+        '[providers.beam]\n'
+        'base_url = "https://beam.invalid/v1"\n'
+        'api_key_env = ""\n'
+        'default_model = "m"\n'
+        'fallback_provider = "ollama"\n\n'
+        '[providers.ollama]\n'
+        'base_url = "http://127.0.0.1:11434/v1"\n'
+        'api_key_env = ""\n'
+        'default_model = "q"\n')
+    return p
+
+
+class TestFallbackProbeWiring:
+    """main() probes once before dispatch; a fallback reason switches
+    the whole session through the existing provider seams."""
+
+    REASON = "HTTP 402: Insufficient account funds"
+    WARN = ("(beam no responde como gratis: HTTP 402: Insufficient "
+            "account funds — usando ollama)\n")
+
+    @staticmethod
+    def _fake_repl(monkeypatch):
+        import ana.cli as cli
+        seen = {"probe_calls": []}
+
+        def fake(cfg_path, **kw):
+            seen.update(kw)
+            return []
+
+        monkeypatch.setattr(cli, "run_repl", fake)
+        return seen
+
+    @staticmethod
+    def _patch_probe(monkeypatch, seen, result):
+        import ana.cli as cli
+
+        def probe(cfg, provider_name):
+            seen["probe_calls"].append(provider_name)
+            return result
+
+        monkeypatch.setattr(cli, "_free_tier_probe", probe)
+
+    def test_probe_reason_switches_repl_to_fallback(self, tmp_path,
+                                                    monkeypatch, capsys):
+        cfg = _fallback_config(tmp_path)
+        seen = self._fake_repl(monkeypatch)
+        self._patch_probe(monkeypatch, seen, self.REASON)
+
+        assert main(["--config", str(cfg)]) == 0
+
+        assert seen["provider_override"] == "ollama"
+        assert seen["probe_calls"] == ["beam"]  # once per process
+        assert capsys.readouterr().err == self.WARN  # exactly one line
+
+    def test_probe_none_keeps_the_default_provider(self, tmp_path,
+                                                   monkeypatch, capsys):
+        cfg = _fallback_config(tmp_path)
+        seen = self._fake_repl(monkeypatch)
+        self._patch_probe(monkeypatch, seen, None)
+
+        assert main(["--config", str(cfg)]) == 0
+
+        assert seen["provider_override"] is None  # no switch
+        assert seen["probe_calls"] == ["beam"]
+        assert capsys.readouterr().err == ""  # no warning printed
+
+    def test_explicit_provider_flag_skips_the_probe(self, tmp_path,
+                                                    monkeypatch, capsys):
+        cfg = _fallback_config(tmp_path)
+        seen = self._fake_repl(monkeypatch)
+        import ana.cli as cli
+        monkeypatch.setattr(
+            cli, "_free_tier_probe",
+            lambda *a: pytest.fail("explicit --provider must not probe"))
+
+        assert main(["--config", str(cfg), "--provider", "ollama"]) == 0
+
+        assert seen["provider_override"] == "ollama"  # user choice wins
+        assert capsys.readouterr().err == ""
+
+    def test_one_shot_message_uses_the_fallback_provider(
+            self, tmp_path, monkeypatch, capsys):
+        cfg = _fallback_config(tmp_path)
+        seen = {"probe_calls": []}
+        self._patch_probe(monkeypatch, seen, self.REASON)
+        import ana.cli as cli
+        picked = {}
+
+        def fake_build_stream(cfg, provider=None, **kw):
+            picked["provider"] = provider
+            return lambda msgs, model, system=None: iter(["hola"])
+
+        monkeypatch.setattr(cli, "build_stream", fake_build_stream)
+
+        rc = main(["--config", str(cfg), "--message", "hola",
+                   "--no-tools"])
+
+        assert rc == 0
+        assert picked["provider"].name == "ollama"
+        assert capsys.readouterr().err == self.WARN
+
+    def test_tui_receives_the_fallback_override(self, tmp_path,
+                                                monkeypatch, capsys):
+        cfg = _fallback_config(tmp_path)
+        seen = {"probe_calls": []}
+        self._patch_probe(monkeypatch, seen, self.REASON)
+        import ana.tui as tui_mod
+        tui_seen = {}
+        monkeypatch.setattr(tui_mod, "run_tui",
+                            lambda path, **kw: tui_seen.update(kw))
+
+        assert main(["--config", str(cfg), "--tui"]) == 0
+
+        assert tui_seen["provider_override"] == "ollama"
+        assert capsys.readouterr().err == self.WARN
+
+    def test_waifu_never_probes(self, tmp_path, monkeypatch):
+        cfg = _fallback_config(tmp_path)
+        import ana.cli as cli
+        monkeypatch.setattr(
+            cli, "_free_tier_probe",
+            lambda *a: pytest.fail("waifu needs no provider, no probe"))
+        import ana.overlay as overlay_mod
+        monkeypatch.setattr(overlay_mod, "run_overlay", lambda: 0)
+
+        assert main(["--config", str(cfg), "waifu"]) == 0
+
+    def test_init_never_probes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        import ana.cli as cli
+        monkeypatch.setattr(
+            cli, "_free_tier_probe",
+            lambda *a: pytest.fail("init needs no provider, no probe"))
+
+        assert main(["init"]) == 0
+        assert (tmp_path / "ana" / "config.toml").exists()

@@ -2,11 +2,13 @@
 
 import http.server
 import json
+import socket
 import threading
 
 import pytest
 
-from ana.client import ProviderClient, ProviderError
+from ana.client import ProviderClient, ProviderError, probe_fallback
+from ana.config import Config, Provider
 
 
 def _sse_chunks(*payloads, done=True):
@@ -105,6 +107,46 @@ class TestChatCompletions:
         assert sent["model"] == "m1"
         assert sent["messages"] == [{"role": "user", "content": "hi"}]
         assert sent["stream"] is True
+
+    def test_sends_custom_provider_headers(self, chat_server):
+        client = ProviderClient(
+            base_url=f"http://127.0.0.1:{chat_server.port}",
+            api_style="chat", api_key="sk-test",
+            provider_headers={"x-opencode-session": "ana-1"})
+        list(client.stream_chat(
+            [{"role": "user", "content": "hi"}], model="m1"))
+        assert chat_server.last_headers["x-opencode-session"] == "ana-1"
+        assert chat_server.last_headers["Authorization"] == "Bearer sk-test"
+
+    def test_tolerates_empty_choices_chunks(self):
+        # mimo emits usage/ping chunks with an explicit empty choices list
+        body = _sse_chunks(
+            {"choices": []},
+            _delta("hola"),
+            {"choices": [{"finish_reason": "stop", "delta": {}}]})
+        server = FakeServer(lambda p: (200, "text/event-stream", body, {}))
+        try:
+            client = ProviderClient(base_url=f"http://127.0.0.1:{server.port}",
+                                    api_style="chat")
+            assert list(client.stream_chat(
+                [{"role": "user", "content": "hi"}], model="m1")) == ["hola"]
+        finally:
+            server.stop()
+
+    def test_tolerates_explicit_null_tool_calls(self):
+        # mimo (opencode-go) sends "tool_calls": null on plain text deltas
+        body = _sse_chunks(
+            {"choices": [{"delta": {"content": "hola",
+                                    "tool_calls": None}}]},
+            {"choices": [{"finish_reason": "stop", "delta": {}}]})
+        server = FakeServer(lambda p: (200, "text/event-stream", body, {}))
+        try:
+            client = ProviderClient(base_url=f"http://127.0.0.1:{server.port}",
+                                    api_style="chat")
+            assert list(client.stream_chat(
+                [{"role": "user", "content": "hi"}], model="m1")) == ["hola"]
+        finally:
+            server.stop()
 
     def test_tolerates_missing_done_marker(self):
         body = _sse_chunks(_delta("ok"), done=False)
@@ -354,3 +396,89 @@ class TestPayloadSpeedFields:
         assert body["max_tokens"] == 1024
         # keep_alive not set by default on this client
         assert "keep_alive" not in body
+
+
+# ------------------------------------------- free-tier startup probe
+
+
+def _probe_config(base_url: str) -> Config:
+    """Minimal config pointing one provider at ``base_url``."""
+    return Config(default_provider="p", providers={"p": Provider(
+        name="p", base_url=base_url, default_model="m1")})
+
+
+class TestFreeTierProbe:
+    """probe_fallback: classify a tiny request against the free endpoint.
+
+    Fallback reason = dead free tier (402/403, funds, quota...);
+    None = healthy OR transient (timeouts, connection errors, 5xx must
+    never switch the session off its provider).
+    """
+
+    @staticmethod
+    def _json_server(status: int, message: str):
+        body = json.dumps({"error": {"message": message}}).encode()
+        return FakeServer(lambda p: (status, "application/json", body, {}))
+
+    def test_http_402_insufficient_funds_returns_reason(self):
+        server = self._json_server(402, "Insufficient account funds")
+        try:
+            reason = probe_fallback(
+                _probe_config(f"http://127.0.0.1:{server.port}"), "p")
+        finally:
+            server.stop()
+        assert reason is not None
+        assert "402" in reason and "Insufficient" in reason
+
+    def test_http_400_unavailable_model_returns_reason(self):
+        server = self._json_server(400, "Model is unavailable")
+        try:
+            reason = probe_fallback(
+                _probe_config(f"http://127.0.0.1:{server.port}"), "p")
+        finally:
+            server.stop()
+        assert reason is not None
+        assert "unavailable" in reason.lower()
+
+    def test_healthy_stream_returns_none(self):
+        body = _sse_chunks(_delta("hi"))
+        server = FakeServer(lambda p: (
+            200, "text/event-stream", body, {}))
+        try:
+            reason = probe_fallback(
+                _probe_config(f"http://127.0.0.1:{server.port}"), "p")
+        finally:
+            server.stop()
+        assert reason is None  # stream started -> healthy, no switch
+
+    def test_connection_refused_returns_none(self):
+        server = FakeServer(lambda p: (200, "text/event-stream", b"", {}))
+        server.stop()  # closed port -> connection refused
+        reason = probe_fallback(
+            _probe_config(f"http://127.0.0.1:{server.port}"), "p")
+        assert reason is None  # transient: must NOT switch providers
+
+    def test_timeout_returns_none(self):
+        # listener that completes the handshake but never answers:
+        # the short probe timeout classifies as transient, not fallback
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        try:
+            cfg = _probe_config(f"http://127.0.0.1:{srv.getsockname()[1]}")
+            reason = probe_fallback(cfg, "p", timeout=0.3)
+        finally:
+            srv.close()
+        assert reason is None  # transient: must NOT switch providers
+
+    def test_http_5xx_returns_none_even_when_body_says_unavailable(self):
+        # 5xx is transient even though "unavailable" is a fallback
+        # keyword: a flaky backend must not silently move Ana off her
+        # provider
+        server = self._json_server(503, "service unavailable, retry")
+        try:
+            reason = probe_fallback(
+                _probe_config(f"http://127.0.0.1:{server.port}"), "p")
+        finally:
+            server.stop()
+        assert reason is None

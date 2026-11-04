@@ -11,11 +11,16 @@ ProviderClient talks to one backend endpoint. Supported styles:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 
 import httpx
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+
+# Startup free-tier probe: SHORT budget so a dead endpoint can't stall
+# session startup (the whole probe is one tiny streaming request).
+PROBE_TIMEOUT = 8.0
 
 
 def _payload_messages(messages, anthropic: bool) -> list[dict]:
@@ -77,6 +82,7 @@ class ProviderClient:
         timeout: float = 120.0,
         keep_alive: str | None = None,
         vision_max_tokens: int | None = None,
+        provider_headers: dict[str, str] | None = None,
     ) -> None:
         if api_style not in ("chat", "anthropic"):
             raise ValueError(f"unknown api_style: {api_style!r}")
@@ -87,6 +93,7 @@ class ProviderClient:
         self.timeout = timeout
         self.keep_alive = keep_alive
         self.vision_max_tokens = vision_max_tokens
+        self.provider_headers = provider_headers or {}
 
     @classmethod
     def from_provider(cls, config, provider, **kwargs) -> "ProviderClient":
@@ -96,6 +103,7 @@ class ProviderClient:
             api_key=config.resolve_key(provider),
             keep_alive=getattr(provider, "keep_alive", None),
             vision_max_tokens=getattr(provider, "vision_max_tokens", None),
+            provider_headers=getattr(provider, "headers", None),
             **kwargs,
         )
 
@@ -126,6 +134,7 @@ class ProviderClient:
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
+        headers.update(self.provider_headers)
         if self.api_key is not None:
             if self.api_style == "anthropic":
                 headers["x-api-key"] = self.api_key
@@ -230,7 +239,8 @@ class ProviderClient:
                 err = event["error"]
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 raise ProviderError(f"provider error: {msg or event}")
-            choice = event.get("choices", [{}])[0]
+            # mimo (opencode-go) can emit chunks with "choices": []
+            choice = (event.get("choices") or [{}])[0]
             delta = choice.get("delta", {})
             reasoning = delta.get("reasoning") or delta.get("reasoning_content")
             if reasoning:
@@ -241,7 +251,8 @@ class ProviderClient:
             text = delta.get("content")
             if text:
                 yield {"type": "text", "content": text}
-            for tc in delta.get("tool_calls", []):
+            # providers like mimo send "tool_calls": null explicitly
+            for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index", 0)
                 slot = pending.setdefault(idx, {"id": "", "name": "", "args": ""})
                 if tc.get("id"):
@@ -324,3 +335,65 @@ class ProviderClient:
                 if reason:
                     stop_reason = reason
         yield {"type": "finish", "finish_reason": stop_reason}
+
+
+# ------------------------------------------- free-tier startup probe
+
+# Messages that mean "the free tier is gone" (case-insensitive match).
+_FALLBACK_MARKERS = ("HTTP 402", "HTTP 403", "insufficient", "funds",
+                     "payment", "paid", "upgrade", "credit", "quota",
+                     "unavailable", "not found")
+
+# Transient failures win over the markers above: a flaky network or a
+# 5xx blip (even a body saying "service unavailable") must never
+# silently move the session off its provider.
+_TRANSIENT_RE = re.compile(
+    r"HTTP 5\d\d|timeout|timed out|cannot reach|connect|network", re.I)
+
+
+def _classify_probe_error(message: str) -> str | None:
+    """Short fallback reason for a probe error; None = no switch."""
+    if _TRANSIENT_RE.search(message):
+        return None
+    if any(marker.lower() in message.lower() for marker in _FALLBACK_MARKERS):
+        reason = message.removeprefix("provider returned ")
+        return reason if len(reason) <= 120 else reason[:119] + "…"
+    return None
+
+
+def probe_fallback(cfg, provider_name: str,
+                   timeout: float = PROBE_TIMEOUT) -> str | None:
+    """Cheap startup health probe of one provider's free endpoint.
+
+    Sends one tiny streaming chat request with a SHORT timeout and
+    consumes at most the first event:
+
+    - a dead free tier (HTTP 402/403, insufficient funds, payment,
+      upgrade, credit, quota, unavailable, not found) returns a short
+      fallback reason;
+    - a healthy endpoint (200 + stream start) returns None;
+    - transient failures (timeouts, connection errors, HTTP 5xx) also
+      return None — a flaky network must not silently move the session
+      off its provider.
+
+    Blind spot: a model that keeps returning 200 while silently billing
+    cannot be detected client-side.
+
+    Tests must patch the ana.cli._free_tier_probe seam instead of ever
+    reaching real endpoints; classification tests run against a local
+    FakeServer only.
+    """
+    provider = cfg.provider(provider_name)
+    if not provider.default_model:
+        return None  # nothing to probe with: leave the decision alone
+    try:
+        client = ProviderClient.from_provider(cfg, provider,
+                                              timeout=timeout)
+        stream = client.stream_chat(
+            [{"role": "user", "content": "ping"}],
+            provider.default_model)
+        for _ in stream:
+            return None  # first event arrived: the stream is alive
+        return None  # reachable (stream had no text): healthy
+    except ProviderError as exc:
+        return _classify_probe_error(str(exc))

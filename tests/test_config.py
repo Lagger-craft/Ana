@@ -64,6 +64,29 @@ class TestLoad:
         with pytest.raises(ConfigError, match="provider 'nope' is not defined"):
             load_config(cfg_path)
 
+    def test_load_parses_provider_headers(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            'default_provider = "oc"\n\n'
+            '[providers.oc]\n'
+            'base_url = "https://example.invalid/v1"\n'
+            'api_key_env = ""\n'
+            'default_model = "m"\n'
+            'headers = { "x-opencode-session" = "ana-1" }\n')
+        cfg = load_config(cfg_path)
+        assert cfg.providers["oc"].headers == {
+            "x-opencode-session": "ana-1"}
+
+    def test_provider_headers_must_be_a_string_table(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            'default_provider = "oc"\n\n'
+            '[providers.oc]\n'
+            'base_url = "https://example.invalid/v1"\n'
+            'headers = "nope"\n')
+        with pytest.raises(ConfigError, match="headers"):
+            load_config(cfg_path)
+
     def test_unknown_provider_keys_rejected(self, tmp_path):
         cfg_path = tmp_path / "config.toml"
         write_template(cfg_path)
@@ -149,3 +172,51 @@ default_model = "m1"
         ollama = data["providers"]["ollama"]
         assert ollama.get("keep_alive") == "1h"
         assert ollama.get("vision_max_tokens") == 1024
+
+
+class TestFallbackProvider:
+    """`fallback_provider = "<provider name>"` — free-tier safety net."""
+
+    def test_fallback_provider_parses_and_defaults_to_none(self, tmp_path):
+        cfg = load_config(_write_config(tmp_path, """
+default_provider = "beam"
+[providers.beam]
+base_url = "https://beam.invalid/v1"
+api_key_env = ""
+default_model = "m"
+fallback_provider = "ollama"
+[providers.ollama]
+base_url = "http://127.0.0.1:11434/v1"
+api_key_env = ""
+default_model = "q"
+"""))
+        # forward reference works: the target is declared AFTER beam
+        assert cfg.provider("beam").fallback_provider == "ollama"
+        # no key declared -> None (default)
+        assert cfg.provider("ollama").fallback_provider is None
+
+    def test_unknown_fallback_target_raises_config_error(self, tmp_path):
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(_write_config(tmp_path, """
+default_provider = "beam"
+[providers.beam]
+base_url = "https://beam.invalid/v1"
+api_key_env = ""
+default_model = "m"
+fallback_provider = "nope"
+"""))
+        # mirrors default_provider validation: names the bad target
+        assert "provider 'nope' is not defined" in str(excinfo.value)
+        assert "fallback_provider" in str(excinfo.value)
+
+    def test_non_string_fallback_target_raises_config_error(self, tmp_path):
+        with pytest.raises(ConfigError,
+                           match="fallback_provider must be a string"):
+            load_config(_write_config(tmp_path, """
+default_provider = "beam"
+[providers.beam]
+base_url = "https://beam.invalid/v1"
+api_key_env = ""
+default_model = "m"
+fallback_provider = 123
+"""))

@@ -95,6 +95,8 @@ class Provider:
     vision_model: str | None = None  # used automatically when images are attached
     keep_alive: str | None = None    # stay-loaded window for local servers
     vision_max_tokens: int | None = None  # output budget for image turns
+    headers: dict[str, str] | None = None  # extra request headers
+    fallback_provider: str | None = None  # switch here when free tier dies
 
     def __post_init__(self) -> None:
         if self.api_style not in VALID_API_STYLES:
@@ -172,7 +174,8 @@ def load_config(path: str | Path) -> Config:
     for name, raw in providers_block.items():
         known_prov = {"base_url", "api_style", "api_key_env",
                       "default_model", "vision_model", "keep_alive",
-                      "vision_max_tokens"}
+                      "vision_max_tokens", "headers",
+                      "fallback_provider"}
         if not isinstance(raw, dict):
             raise ConfigError(f"{path}: provider '{name}' must be a table")
         bad = sorted(set(raw) - known_prov)
@@ -180,6 +183,14 @@ def load_config(path: str | Path) -> Config:
             raise ConfigError(
                 f"{path}: unknown keys in [providers.{name}]: {', '.join(bad)}")
         max_tokens = raw.get("vision_max_tokens")
+        hdrs = raw.get("headers")
+        if hdrs is not None and (
+                not isinstance(hdrs, dict)
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in hdrs.items())):
+            raise ConfigError(
+                f"{path}: provider '{name}': headers must be a table "
+                "of string values")
         providers[name] = Provider(
             name=name,
             base_url=str(raw.get("base_url", "")),
@@ -189,6 +200,8 @@ def load_config(path: str | Path) -> Config:
             vision_model=raw.get("vision_model") or None,
             keep_alive=raw.get("keep_alive") or None,
             vision_max_tokens=int(max_tokens) if max_tokens else None,
+            headers=dict(hdrs) if hdrs else None,
+            fallback_provider=raw.get("fallback_provider") or None,
         )
 
     cfg = Config(
@@ -197,4 +210,20 @@ def load_config(path: str | Path) -> Config:
         system_prompt=str(data.get("system_prompt", "")),
     )
     cfg.provider()  # validates default_provider exists
+    for name, prov in providers.items():
+        # mirror default_provider validation: the fallback target must
+        # exist in THIS config, and the error names the bad target
+        target = prov.fallback_provider
+        if target is None:
+            continue
+        if not isinstance(target, str):
+            raise ConfigError(
+                f"{path}: provider '{name}': fallback_provider must be "
+                "a string")
+        try:
+            cfg.provider(target)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"{path}: provider '{name}': fallback_provider: {exc}"
+            ) from None
     return cfg

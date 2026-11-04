@@ -428,3 +428,60 @@ class TestTalkCommand:
         assert excinfo.value.code == 0
         assert "talk" in out
         assert "hotkey" in out.lower()
+
+    def test_dispatch_probes_and_passes_fallback_provider(
+            self, tmp_path, monkeypatch):
+        """The hotkey path probes too: run_talk gets the fallback."""
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            'default_provider = "beam"\n\n'
+            '[providers.beam]\n'
+            'base_url = "https://beam.invalid/v1"\n'
+            'api_key_env = ""\n'
+            'default_model = "m"\n'
+            'fallback_provider = "ollama"\n\n'
+            '[providers.ollama]\n'
+            'base_url = "http://127.0.0.1:11434/v1"\n'
+            'api_key_env = ""\n'
+            'default_model = "q"\n')
+        import ana.cli as cli
+        monkeypatch.setattr(
+            cli, "_free_tier_probe",
+            lambda cfg, name: "HTTP 402: Insufficient account funds")
+        seen = {}
+        monkeypatch.setattr(
+            talk_mod, "run_talk",
+            lambda path, **kw: seen.update(kw) or 0)
+
+        assert main(["--config", str(cfg_path), "talk"]) == 0
+
+        assert seen["provider"] == "ollama"
+        assert seen["stt"] is None  # existing dispatch unchanged
+
+
+# ------------------------------------------------ provider plumbing
+
+
+class TestTalkProviderPlumb:
+    """run_talk forwards `provider` to run_repl as provider_override."""
+
+    def test_run_talk_passes_provider_to_run_repl(self, cfg, monkeypatch,
+                                                  notifies):
+        voice = FakeTalkVoice(transcript="hola")
+        seen = {}
+        monkeypatch.setattr(talk_mod, "run_repl", _fake_repl(seen))
+
+        assert _run(cfg, voice, notifies, provider="ollama") == 0
+
+        assert seen["provider_override"] == "ollama"
+
+    def test_run_talk_default_provider_stays_none(self, cfg, monkeypatch,
+                                                  notifies):
+        """No provider argument -> byte-identical existing behavior."""
+        voice = FakeTalkVoice(transcript="hola")
+        seen = {}
+        monkeypatch.setattr(talk_mod, "run_repl", _fake_repl(seen))
+
+        assert _run(cfg, voice, notifies) == 0
+
+        assert seen["provider_override"] is None

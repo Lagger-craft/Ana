@@ -53,6 +53,17 @@ Config keys: `default_provider`, `system_prompt`, and one
 (`chat` for OpenAI-compatible endpoints, `anthropic` for the Messages
 API), `api_key_env`, `default_model`.
 
+Any provider table may declare `fallback_provider = "NAME"` (the
+target must also exist in the config). When a session starts without an
+explicit `--provider`, Ana probes the effective provider's endpoint
+once with a short (~8 s) timeout: a payment/quota/unavailable-style
+rejection prints a single warning on stderr and the whole session —
+REPL, `-m`, TUI and `talk` — switches to the fallback provider, while
+timeouts, connection errors and 5xx answers keep the original provider
+(a flaky network never moves Ana off it). The probe cannot catch a
+provider that keeps answering HTTP 200 while silently billing — that
+blind spot is unobservable from the client side.
+
 To let Ana search the web, also export `TAVILY_API_KEY`
 (free tier: https://tavily.com).
 
