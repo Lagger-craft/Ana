@@ -103,7 +103,7 @@ def _choose_gdk_monitor(shell):
 
 
 def _reexec_system_python() -> "NoReturn":
-    """os.execl the system /usr/bin/python3 for this overlay process."""
+    """os.execve the system /usr/bin/python3 for this overlay process."""
     import pathlib
 
     pkg_parent = str(pathlib.Path(__file__).resolve().parent.parent)
@@ -112,8 +112,8 @@ def _reexec_system_python() -> "NoReturn":
     if pkg_parent not in extra.split(os.pathsep):
         env["PYTHONPATH"] = (pkg_parent + os.pathsep
                              + extra).rstrip(os.pathsep)
-    os.execl("/usr/bin/python3", "python3", "-m", "ana.overlay",
-             *sys.argv[1:])
+    os.execve("/usr/bin/python3", ["python3", "-m", "ana.overlay",
+                                   *sys.argv[1:]], env)
 
 
 def layer_shell_lib(root: str = "/usr/lib") -> str | None:
