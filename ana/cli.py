@@ -414,8 +414,9 @@ def _do_turn(cfg, provider, models, model, history, line, emit,
     has_images = bool(images)
     base_len = len(history)
     history.append(_user_message(line, images))
+    provider_cfg = cfg.provider(provider)
     active_model = _model_for_turn(
-        cfg.provider(provider), model, has_images=has_images,
+        provider_cfg, model, has_images=has_images,
         fallback=(None if model is not None
                   else _default_model(cfg, provider, models)) or "")
     system = _system_prompt(cfg)
@@ -427,6 +428,7 @@ def _do_turn(cfg, provider, models, model, history, line, emit,
                 client, history, active_model, active_registry,
                 emit=emit, system=system, max_rounds=max_rounds,
                 on_tool=lambda name, args: emit(f"⚙ {name}({args})"),
+                vision_model=provider_cfg.vision_model,
             )
         else:
             _plain_stream(history, active_model, system, emit,
@@ -734,6 +736,7 @@ def main(argv: list[str] | None = None) -> int:
                         model, _default_registry(),
                         emit=lambda t: print(t, end="", flush=True),
                         system=_system_prompt(cfg),
+                        vision_model=p.vision_model,
                     )
                     print()
             except (ProviderError, ConfigError, AgentError) as exc:

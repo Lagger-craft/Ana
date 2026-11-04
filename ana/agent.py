@@ -4,6 +4,17 @@ run_agent() drives provider stream_turn() through ToolRegistry-backed
 tool calls, respecting per-dialect message shapes:
 - chat style: assistant tool_calls[] + role="tool" results
 - anthropic: tool_use blocks + tool_result blocks in a user message
+
+Tool result convention (NON-BREAKING): a tool fn returns its result
+as before — a plain str (or any JSON-serializable value) becomes the
+ordinary tool-result text and nothing else changes. A fn may instead
+return a ``ToolResult``: its ``text`` fills the normal tool-result
+slot, and its ``image`` (``{media_type, data(base64)}`` — the same
+shape client.py already sends) is delivered as a synthetic
+``{"role": "user", "content": ..., "images": [...]}`` message right
+after that round's tool results, so the model answers from the picture
+in the SAME run. Once an image is injected, later rounds stream with
+the caller's ``vision_model`` (``model`` when absent — best effort).
 """
 
 from __future__ import annotations
@@ -28,6 +39,21 @@ class Tool:
     def __post_init__(self) -> None:
         if not self.name or " " in self.name:
             raise AgentError(f"invalid tool name: {self.name!r}")
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Tool result that can also carry an image into the current turn.
+
+    ``text`` is what the model reads in the tool-result slot (exactly
+    what a plain str return would produce). When ``image`` is set —
+    ``{"media_type", "data(base64)}`` — run_agent appends a synthetic
+    user message carrying it and switches the run to the caller's
+    ``vision_model``. Plain str/dict returns keep today's behavior.
+    """
+
+    text: str
+    image: dict | None = None
 
 
 class ToolRegistry:
@@ -82,23 +108,31 @@ def run_agent(
     on_tool: Callable[[str, dict], None] | None = None,
     system: str | None = None,
     max_rounds: int = 4,
+    vision_model: str | None = None,
 ) -> list[dict]:
     """Run one user turn with tools; return the updated history.
 
     ``messages`` must END with the user message. Text is streamed to
     ``emit`` as it arrives; ``on_tool(name, args)`` is called just
     before each tool runs so callers can surface progress.
+
+    ``vision_model``: after a ``ToolResult`` with an image is injected,
+    every later ``stream_turn`` in this run uses it (when set); without
+    an injection — or when it is None — ``model`` is used unchanged.
+    See the module docstring for the tool-result convention.
     """
     style = client.api_style
     tools = registry.to_spec(style) if len(registry) else None
     if messages[-1]["role"] != "user":
         raise AgentError("messages must end with the user turn")
 
+    current_model = model
+
     for _round in range(max_rounds):
         reply_text: list[str] = []
         calls: list[dict] = []
         reasoning_noted = False
-        for event in client.stream_turn(messages, model, system=system,
+        for event in client.stream_turn(messages, current_model, system=system,
                                         tools=tools):
             if event["type"] == "text":
                 reply_text.append(event["content"])
@@ -119,6 +153,23 @@ def run_agent(
             messages.append({"role": "assistant", "content": text})
             return messages
 
+        # one shared executor for both dialects: runs the tool, collects
+        # any image for same-turn injection, returns the result text
+        shots: list[dict] = []
+
+        def _invoke(call: dict) -> str:
+            if on_tool:
+                on_tool(call["name"], call["arguments"])
+            try:
+                value = registry.call(call["name"], call["arguments"])
+            except AgentError as exc:
+                return f"tool error: {exc}"
+            if isinstance(value, ToolResult):
+                if value.image:
+                    shots.append(value.image)
+                return value.text
+            return _stringify(value)
+
         if style == "anthropic":
             blocks: list[dict] = []
             if "".join(reply_text):
@@ -129,21 +180,10 @@ def run_agent(
                     "name": call["name"], "input": call["arguments"],
                 })
             messages.append({"role": "assistant", "content": blocks})
-            results: list[dict] = []
-            for call in calls:
-                if on_tool:
-                    on_tool(call["name"], call["arguments"])
-                try:
-                    value = registry.call(call["name"], call["arguments"])
-                    results.append({
-                        "type": "tool_result", "tool_use_id": call["id"],
-                        "content": _stringify(value),
-                    })
-                except AgentError as exc:
-                    results.append({
-                        "type": "tool_result", "tool_use_id": call["id"],
-                        "content": f"tool error: {exc}",
-                    })
+            results: list[dict] = [{
+                "type": "tool_result", "tool_use_id": call["id"],
+                "content": _invoke(call),
+            } for call in calls]
             messages.append({"role": "user", "content": results})
         else:
             assistant_msg: dict = {"role": "assistant",
@@ -160,17 +200,22 @@ def run_agent(
                                    } for c in calls]}
             messages.append(assistant_msg)
             for call in calls:
-                if on_tool:
-                    on_tool(call["name"], call["arguments"])
-                try:
-                    value = registry.call(call["name"], call["arguments"])
-                    content = _stringify(value)
-                except AgentError as exc:
-                    content = f"tool error: {exc}"
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"],
-                    "content": content,
+                    "content": _invoke(call),
                 })
+
+        if shots:
+            # same-turn injection: the picture rides back as a synthetic
+            # user message BEFORE the next round streams, and that round
+            # (and every later one in this run) uses the vision model
+            messages.append({
+                "role": "user",
+                "content": "Screenshot attached — answer from this image.",
+                "images": shots,
+            })
+            if vision_model:
+                current_model = vision_model
 
     raise AgentError(
         f"model kept requesting tool rounds (limit {max_rounds}); stopping")

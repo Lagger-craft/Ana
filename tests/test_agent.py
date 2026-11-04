@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ana.agent import AgentError, Tool, ToolRegistry, run_agent
+from ana.agent import AgentError, Tool, ToolRegistry, ToolResult, run_agent
 from ana.client import ProviderClient
 from tests.test_client import FakeServer, _sse_chunks, _delta
 
@@ -222,6 +222,117 @@ class TestAgentLoopAnthropic:
             assert blocks[0]["content"] == "hola"
         finally:
             server.stop()
+
+
+def _shot_round(id="s1"):
+    return [
+        {"type": "tool_call", "id": id, "name": "screenshot",
+         "arguments": {}},
+        {"type": "finish", "finish_reason": "tool_calls"},
+    ]
+
+
+def _final_round(text="veo tu escritorio con varios iconos"):
+    return [
+        {"type": "text", "content": text},
+        {"type": "finish", "finish_reason": "stop"},
+    ]
+
+
+class FakeTurnClient:
+    """Records every (model, messages) call and serves canned event rounds.
+
+    Messages are snapshotted per call because run_agent mutates the
+    shared history AFTER stream_turn returns.
+    """
+
+    api_style = "chat"
+
+    def __init__(self, rounds):
+        self._rounds = list(rounds)
+        self.calls = []
+
+    def stream_turn(self, messages, model, system=None, tools=None):
+        self.calls.append((model, [dict(m) for m in messages]))
+        return iter(self._rounds[len(self.calls) - 1])
+
+
+class TestImageToolInjection:
+    """ToolResult: an image rides back into the SAME run as the tool.
+
+    Plain str results must keep the exact pre-existing message
+    sequence (regression pin); only ToolResult triggers injection and
+    the vision_model switch.
+    """
+
+    @staticmethod
+    def _shot_registry():
+        reg = ToolRegistry()
+        reg.register(Tool(
+            name="screenshot", description="capture the screen",
+            parameters={"type": "object", "properties": {}},
+            fn=lambda a: ToolResult(
+                text="screenshot attached",
+                image={"media_type": "image/png", "data": "aW1n"})))
+        return reg
+
+    def test_injects_image_message_and_switches_to_vision_model(self):
+        client = FakeTurnClient([_shot_round(), _final_round()])
+
+        history = run_agent(
+            client, [{"role": "user", "content": "what's on my display"}],
+            model="text-m", registry=self._shot_registry(),
+            emit=lambda _: None, vision_model="vision-m")
+
+        assert len(client.calls) == 2
+        assert client.calls[0][0] == "text-m"      # round 1: base model
+        model, msgs = client.calls[1]
+        assert model == "vision-m"                 # round 2: vision model
+        assert [m["role"] for m in msgs] == [
+            "user", "assistant", "tool", "user"]
+        assert msgs[1]["tool_calls"][0]["function"]["name"] == "screenshot"
+        assert msgs[2]["content"] == "screenshot attached"
+        assert msgs[3]["images"] == [{"media_type": "image/png",
+                                      "data": "aW1n"}]
+        assert "screenshot" in msgs[3]["content"].lower()
+        # the shared history carries the same injected message
+        assert history[-2]["role"] == "user"
+        assert history[-2]["images"] == [{"media_type": "image/png",
+                                          "data": "aW1n"}]
+        assert history[-1]["role"] == "assistant"
+
+    def test_plain_str_result_message_sequence_unchanged(self):
+        client = FakeTurnClient([_shot_round(), _final_round()])
+        reg = ToolRegistry()
+        reg.register(Tool(
+            name="screenshot", description="d",
+            parameters={"type": "object", "properties": {}},
+            fn=lambda a: "no image here"))
+
+        run_agent(
+            client, [{"role": "user", "content": "hola"}], model="m1",
+            registry=reg, emit=lambda _: None, vision_model="vision-m")
+
+        assert len(client.calls) == 2
+        model, msgs = client.calls[1]
+        assert model == "m1"                       # no image → no switch
+        assert [m["role"] for m in msgs] == ["user", "assistant", "tool"]
+        assert msgs[2]["content"] == "no image here"
+        assert "images" not in msgs[2]
+
+    def test_injection_without_vision_model_keeps_model(self):
+        client = FakeTurnClient([_shot_round(), _final_round()])
+
+        run_agent(
+            client, [{"role": "user", "content": "what's on screen"}],
+            model="m1", registry=self._shot_registry(),
+            emit=lambda _: None)                   # vision_model omitted
+
+        assert len(client.calls) == 2
+        model, msgs = client.calls[1]
+        assert model == "m1"                       # best effort, no crash
+        assert msgs[-1]["images"] == [{"media_type": "image/png",
+                                       "data": "aW1n"}]
 
 
 def FakeServer_with(path, bodies=None):

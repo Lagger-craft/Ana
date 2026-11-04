@@ -1,6 +1,8 @@
 """Tests for ana.tools — Tavily web search, hyprctl read-only, system info,
 Engram-backed memory tools."""
 
+import os
+import shutil
 import sys
 
 import pytest
@@ -148,7 +150,180 @@ class TestToolInstances:
         assert set(reg.names()) == {
             "web_search", "hypr_active_window", "hypr_workspaces",
             "hypr_monitors", "hypr_version", "hypr_devices", "system_info",
-            "current_time", "memory_save", "memory_search"}
+            "current_time", "memory_save", "memory_search", "screenshot"}
+
+
+# --------------------------------------------- screenshot (same-turn image)
+
+
+class TestScreenshot:
+    """spectacle captures the active monitor -> ToolResult image for the
+    current turn. Tests patch the `_run_spectacle` subprocess seam — the
+    suite never runs the real binary."""
+
+    def test_registered_with_screen_description_and_empty_schema(self, tools):
+        assert "screenshot" in tools.names()
+        spec = [t for t in tools.to_spec("chat")
+                if t["function"]["name"] == "screenshot"][0]["function"]
+        assert spec["parameters"]["properties"] == {}
+        assert spec["parameters"].get("required", []) == []
+        desc = spec["description"].lower()
+        assert "screen" in desc
+
+    def test_capture_runs_spectacle_with_active_monitor_flags(
+            self, tools, monkeypatch):
+        import base64 as _b64
+        import ana.tools as tools_mod
+        monkeypatch.setattr(tools_mod.shutil, "which",
+                            lambda name: "/usr/bin/spectacle")
+        ran = []
+
+        def fake_run(cmd, timeout=None):
+            ran.append((cmd, timeout))
+            out = cmd[cmd.index("-o") + 1]
+            with open(out, "wb") as fh:
+                fh.write(b"\x89PNG-fake-bytes")
+            return type("Proc", (), {"returncode": 0, "stderr": b""})()
+
+        monkeypatch.setattr(tools_mod, "_run_spectacle", fake_run)
+        result = tools.call("screenshot", {})
+
+        from ana.agent import ToolResult
+        assert isinstance(result, ToolResult)
+        cmd, timeout = ran[0]
+        assert cmd[:5] == ["spectacle", "-b", "-m", "-n", "-o"]
+        assert timeout == 10
+        out = cmd[5]
+        assert out.endswith(".png")
+        assert not os.path.exists(out)      # tmp file never leaks
+        assert result.image["media_type"] == "image/png"
+        assert result.image["data"] == _b64.b64encode(
+            b"\x89PNG-fake-bytes").decode("ascii")
+        assert isinstance(result.text, str) and result.text
+
+    def test_spectacle_failure_degrades_to_error_string(self, tools,
+                                                        monkeypatch):
+        import ana.tools as tools_mod
+        monkeypatch.setattr(tools_mod.shutil, "which",
+                            lambda name: "/usr/bin/spectacle")
+        ran = []
+
+        def fake_run(cmd, timeout=None):
+            ran.append(cmd)
+            return type("Proc", (), {"returncode": 1,
+                                     "stderr": b"no compositor"})()
+
+        monkeypatch.setattr(tools_mod, "_run_spectacle", fake_run)
+        out = tools.call("screenshot", {})
+        assert isinstance(out, str)          # honest note, never an exception
+        assert "no compositor" in out        # carries spectacle's reason
+        tmp_out = ran[0][ran[0].index("-o") + 1]
+        assert not os.path.exists(tmp_out)   # no leftovers on failure either
+
+    def test_missing_spectacle_degrades_to_error_string(self, tools,
+                                                        monkeypatch,
+                                                        tmp_path):
+        monkeypatch.setenv("PATH", str(tmp_path))   # no spectacle anywhere
+        monkeypatch.setattr("ana.tools._run_spectacle",
+                            lambda *a, **k: pytest.fail("must not run"))
+        out = tools.call("screenshot", {})
+        assert isinstance(out, str)
+        assert "spectacle" in out
+        assert "unavailable" in out
+
+    def test_spectacle_timeout_degrades_to_error_string(self, tools,
+                                                        monkeypatch):
+        import subprocess
+        import ana.tools as tools_mod
+        monkeypatch.setattr(tools_mod.shutil, "which",
+                            lambda name: "/usr/bin/spectacle")
+
+        def fake_run(cmd, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+        monkeypatch.setattr(tools_mod, "_run_spectacle", fake_run)
+        out = tools.call("screenshot", {})
+        assert isinstance(out, str)          # a hung capture must not kill
+        assert "timed out" in out            # the turn either
+
+    @staticmethod
+    def _ffmpeg_seam(w, h, color="red"):
+        """Fake spectacle that writes a REAL w×h PNG via ffmpeg."""
+        import subprocess
+
+        def fake_run(cmd, timeout=None):
+            out = cmd[cmd.index("-o") + 1]
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                 "-i", f"color=c={color}:s={w}x{h}",
+                 "-frames:v", "1", out],
+                check=True, capture_output=True)
+            return type("Proc", (), {"returncode": 0, "stderr": b""})()
+
+        return fake_run
+
+    @pytest.mark.skipif(
+        not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+        reason="ffmpeg/ffprobe needed for the shrink pipeline")
+    def test_oversized_capture_downscaled_in_injected_message(
+            self, tools, monkeypatch):
+        """A raw 2000×1080-class capture must NOT reach the provider:
+
+        the shared /img pipeline (ANA_IMAGE_MAX_PX, default 1024) runs
+        before base64, and the SHRUNK bytes are what the agent loop
+        injects into the turn (image/png stays image/png).
+        """
+        import base64 as _b64
+        import struct
+        import ana.tools as tools_mod
+        from tests.test_agent import FakeTurnClient, _final_round, _shot_round
+        from ana.agent import run_agent
+
+        monkeypatch.setenv("ANA_IMAGE_MAX_PX", "1024")
+        monkeypatch.setattr(tools_mod.shutil, "which",
+                            lambda name: "/usr/bin/spectacle")
+        monkeypatch.setattr(tools_mod, "_run_spectacle",
+                            self._ffmpeg_seam(2000, 1500))
+
+        client = FakeTurnClient([_shot_round(), _final_round()])
+        run_agent(client, [{"role": "user", "content": "what's on screen"}],
+                  model="m1", registry=tools, emit=lambda _: None,
+                  vision_model="v1")
+
+        injected = client.calls[1][1][-1]     # synthetic user message
+        assert injected["role"] == "user"
+        image = injected["images"][0]
+        assert image["media_type"] == "image/png"
+        raw = _b64.b64decode(image["data"])
+        w, h = struct.unpack(">II", raw[16:24])   # PNG IHDR
+        assert w <= 1024 and h <= 1024            # ANA_IMAGE_MAX_PX
+
+    @pytest.mark.skipif(
+        not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+        reason="ffmpeg/ffprobe needed for the shrink pipeline")
+    def test_small_capture_passes_through_without_upscale(
+            self, tools, monkeypatch):
+        """Below the limit the shared pipeline must not touch the file:
+        a 64×48 capture injects as the same 64×48 PNG — no upscale,
+        no re-encode.
+        """
+        import base64 as _b64
+        import struct
+        import ana.tools as tools_mod
+        from ana.agent import ToolResult
+
+        monkeypatch.setenv("ANA_IMAGE_MAX_PX", "1024")
+        monkeypatch.setattr(tools_mod.shutil, "which",
+                            lambda name: "/usr/bin/spectacle")
+        monkeypatch.setattr(tools_mod, "_run_spectacle",
+                            self._ffmpeg_seam(64, 48, color="blue"))
+
+        result = tools.call("screenshot", {})
+
+        assert isinstance(result, ToolResult)
+        assert result.image["media_type"] == "image/png"
+        raw = _b64.b64decode(result.image["data"])
+        assert struct.unpack(">II", raw[16:24]) == (64, 48)
 
 
 # --------------------------------------------- current_time (S8+)

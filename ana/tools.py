@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import httpx
 
@@ -17,7 +19,7 @@ from datetime import datetime, timezone as _timezone
 from zoneinfo import ZoneInfo
 
 from . import memory
-from .agent import Tool, ToolRegistry
+from .agent import Tool, ToolRegistry, ToolResult
 
 TAVILY_URL = "https://api.tavily.com/search"
 
@@ -160,6 +162,71 @@ def _memory_search(args: dict) -> str:
         return f"memoria no disponible: {exc.__class__.__name__}: {exc}"
 
 
+def _run_spectacle(cmd: list[str], timeout: float = 10.0):
+    """Subprocess seam for the screenshot capture (tests patch this)."""
+    return subprocess.run(cmd, capture_output=True, timeout=timeout,
+                          check=False)
+
+
+def _screenshot(args: dict) -> "str | ToolResult":
+    """Capture the active monitor via spectacle; same-turn image on success.
+
+    run_agent only traps AgentError, so a missing binary, a timeout or a
+    non-zero exit MUST read as an honest one-line string the model
+    can understand and stop retrying — never raise. On success the
+    capture is downscaled by the SHARED /img pipeline (see
+    _encode_image: ANA_IMAGE_MAX_PX, default 1024 — a raw 2560×1080
+    would blow the provider's 120s vision-turn timeout) and rides back
+    as a ToolResult so the agent loop injects it into THIS turn (no
+    file is kept: the tmp capture is always deleted).
+    """
+    if shutil.which("spectacle") is None:
+        return ("screenshot unavailable: spectacle is not installed — "
+                "cannot capture the screen (do not retry this tool)")
+    fd, path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        try:
+            proc = _run_spectacle(
+                ["spectacle", "-b", "-m", "-n", "-o", path], timeout=10)
+        except subprocess.TimeoutExpired:
+            return ("screenshot unavailable: spectacle timed out after "
+                    "10s (do not retry this tool)")
+        except OSError as exc:
+            return (f"screenshot unavailable: {exc.__class__.__name__}: "
+                    f"{exc} (do not retry this tool)")
+        if proc.returncode != 0:
+            err = proc.stderr or b""
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", "replace")
+            err = str(err).strip()
+            return f"screenshot failed: {err or 'spectacle exited non-zero'}"
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            return f"screenshot failed: {exc.__class__.__name__}: {exc}"
+        if not data:
+            return "screenshot failed: spectacle produced an empty file"
+        # Downscale with the SAME helper the /img pipeline uses
+        # (ana.cli._encode_image applies ANA_IMAGE_MAX_PX before base64).
+        # The import is deferred: ana.cli imports THIS module at load
+        # time, so a module-level import would create a cli↔tools cycle.
+        from .cli import _encode_image
+        try:
+            image = _encode_image(path)
+        except ValueError as exc:  # not an image: honest note, never raise
+            return f"screenshot failed: {exc}"
+        return ToolResult(
+            text="Screenshot captured and attached to this conversation.",
+            image=image)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def build_default_tools() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(Tool(
@@ -204,6 +271,19 @@ def build_default_tools() -> ToolRegistry:
         description="Return OS/kernel/python/load/CPU info about this machine.",
         parameters={"type": "object", "properties": {}},
         fn=_system_info,
+    ))
+    # screen capture: the image is injected into the SAME turn by the
+    # agent loop (see ana/agent.py ToolResult) — never stored in memory
+    reg.register(Tool(
+        name="screenshot",
+        description=(
+            "Capture the current screen (the active monitor) and attach "
+            "the screenshot to this conversation. Use when the user asks "
+            "what is on the screen, what a program is showing or doing, "
+            "or what something looks like. Never store the image in "
+            "memory."),
+        parameters={"type": "object", "properties": {}},
+        fn=_screenshot,
     ))
     # Ana's own Engram-backed memory (namespace: ana-asistente)
     reg.register(Tool(

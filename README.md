@@ -143,6 +143,10 @@ Built-ins include `current_time` (the model never guesses the time —
 it calls the tool), `system_info`, `web_search` (Tavily key) and Ana's
 own memory tools `memory_save` / `memory_search` (Engram — see
 [Memory (Engram)](#memory-engram)).
+The `screenshot` tool captures the active monitor (Spectacle) and
+feeds the image into the SAME turn, so a plain question like
+"what's on my display?" or "what is this program doing?" is answered
+from the picture — no command needed, just ask.
 
 ### Local examples (no cloud)
 
