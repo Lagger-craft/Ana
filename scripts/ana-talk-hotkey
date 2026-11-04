@@ -1,0 +1,29 @@
+#!/bin/sh
+# Global-hotkey entry point for `ana talk` (S15c): bound in KDE Plasma's
+# Shortcuts KCM via a net.local.ana-talk.desktop command shortcut, and
+# usable from any other compositor's config.
+#
+# Two reasons this wrapper exists instead of binding `.venv/bin/ana`
+# directly:
+#
+# - kglobalaccel runs Exec from kwin_wayland, whose PATH has no
+#   ~/.local/bin — where the voxtype STT engine lives. Prepend a
+#   session-grade PATH before handing over.
+# - The waifu overlay is display-only: without its FIFO reader the
+#   say/talk/idle events go nowhere. Bring it up if it is not running
+#   (same anchored single-instance match as scripts/ana-quick, so
+#   wrapper shells that merely contain the words never count).
+set -u
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ANA="$REPO/.venv/bin/ana"
+
+PATH="$HOME/.local/bin:$PATH"
+export PATH
+
+if ! pgrep -f '^python3 -m ana\.overlay|bin/ana waifu$' >/dev/null 2>&1; then
+    # detached: survives the exec below; log for post-mortems
+    (nohup "$ANA" waifu >/tmp/ana-waifu.log 2>&1 </dev/null &)
+fi
+
+exec "$ANA" talk "$@"

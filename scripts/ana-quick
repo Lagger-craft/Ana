@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Ana quick launcher: bring up the waifu overlay (only if it is not
 # already running) and open the chat TUI in the default terminal.
-# Bound to SUPER+A in ~/.config/hypr/bindings.lua (S15/T33); for
-# labwc/KDE/Niri the same script is bound in that compositor's config.
+# Bound to Meta+A in KDE Plasma (System Settings → Shortcuts, command
+# "Ana — Abrir", S15/T33); in Hyprland the same script binds via
+# ~/.config/hypr/bindings.lua, and in labwc/Niri via their own config.
 #
 # Single overlay instance matters: two FIFO readers would split every
 # say/state event between them and the subtitle would flicker randomly.
 set -u
+
+# kglobalaccel launches this from kwin_wayland, whose PATH has no
+# ~/.local/bin — where the voxtype STT engine lives. Prepend it so the
+# TUI voice rounds work no matter who starts us.
+PATH="$HOME/.local/bin:$PATH"
+export PATH
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANA="$REPO/.venv/bin/ana"
