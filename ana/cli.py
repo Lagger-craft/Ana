@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from . import __version__
+from . import memory
 from .agent import AgentError, ToolRegistry, run_agent
 from .client import ProviderClient, ProviderError
 from .config import Config, ConfigError, Provider, load_config, write_template, default_config_path
@@ -260,32 +261,40 @@ def run_repl(
         # regular chat turn: pending images ride this message once
         attachments = list(pending_images)
         pending_images.clear()
-        turn_state = _do_turn(cfg, provider, models, model, history, line,
-                              emit, current_stream, tools_on,
-                              active_registry, client_fx, max_rounds,
-                              images=attachments)
-        if turn_state == "tools-unavailable":
-            tools_on = False  # stay off for the rest of the session
         # S15b: the REPL drives the overlay like the TUI does — the
-        # subtitle gets every NEW reply (never a rolled-back stale one),
-        # and voice wraps the speak with talk→idle. waifu_send is a
-        # silent no-op when no overlay listens.
+        # avatar stays in `talk` for the WHOLE turn (streaming, tools
+        # and, with voice, the speak), the subtitle gets every NEW
+        # reply (never a rolled-back stale one), and `idle` brackets
+        # every turn even on failure so the waifu never sticks.
+        # waifu_send is a silent no-op when no overlay listens.
         from .waifu import waifu_send
 
-        if (turn_state in ("ok", "tools-unavailable")
-                and history and history[-1]["role"] == "assistant"):
-            reply = history[-1]["content"]
-            waifu_send({"type": "say", "text": reply})
-            if voice_on:
-                waifu_send({"type": "state", "state": "talk"})
-                try:
-                    vfx.speak(reply)
-                except VoiceError as exc:
-                    emit(f"(voice unavailable: {exc})")
-                finally:
-                    waifu_send({"type": "state", "state": "idle"})
+        waifu_send({"type": "state", "state": "talk"})
+        try:
+            turn_state = _do_turn(cfg, provider, models, model, history,
+                                  line, emit, current_stream, tools_on,
+                                  active_registry, client_fx, max_rounds,
+                                  images=attachments)
+            if turn_state == "tools-unavailable":
+                tools_on = False  # stay off for the rest of the session
+            if (turn_state in ("ok", "tools-unavailable")
+                    and history and history[-1]["role"] == "assistant"):
+                reply = history[-1]["content"]
+                waifu_send({"type": "say", "text": reply})
+                if voice_on:
+                    try:
+                        vfx.speak(reply)
+                    except VoiceError as exc:
+                        emit(f"(voice unavailable: {exc})")
+        finally:
+            waifu_send({"type": "state", "state": "idle"})
         emit("")
 
+    # Option B (user choice): the chat owns the overlay — closing the
+    # chat closes it; ana-quick reopens a fresh one on the next session.
+    from .waifu import waifu_send
+    waifu_send({"type": "quit"})
+    memory.shutdown()  # best-effort: end Ana's Engram session at exit
     return history
 
 
@@ -344,6 +353,22 @@ class _DefaultVoice:
         PiperTTS().speak(text)
 
 
+def _system_prompt(cfg: Config) -> str | None:
+    """Config prompt with Ana's memory context prepended (session start).
+
+    ``session_context()`` is fetched at most once per process and is
+    ``""`` when memory is disabled or Engram is down, so the prompt
+    stays byte-identical to ``cfg.system_prompt`` in those cases.
+    """
+    base = cfg.system_prompt or None
+    ctx = memory.session_context()
+    if not ctx:
+        return base
+    if base:
+        return f"{ctx.strip()}\n\n{base}"
+    return ctx
+
+
 def _do_turn(cfg, provider, models, model, history, line, emit,
              current_stream, tools_on, active_registry, client_fx, max_rounds,
              images=None):
@@ -363,7 +388,7 @@ def _do_turn(cfg, provider, models, model, history, line, emit,
         cfg.provider(provider), model, has_images=has_images,
         fallback=(None if model is not None
                   else _default_model(cfg, provider, models)) or "")
-    system = cfg.system_prompt or None
+    system = _system_prompt(cfg)
     used_tools = tools_on and active_registry is not None and len(active_registry)
     try:
         if used_tools:
@@ -574,10 +599,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="one-shot prompt; print and exit")
     parser.add_argument("--no-tools", action="store_true",
                         help="disable tool calling for this session")
-    parser.add_argument("--voice", action="store_true",
-                        help="voice mode: push-to-talk (Enter starts/"
-                             "stops recording; local STT, replies are "
-                             "spoken via Piper)")
+    parser.add_argument("--voice", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="voice mode (default ON): push-to-talk (Enter "
+                             "starts/stops recording; local STT, replies "
+                             "are spoken via Piper); --no-voice starts "
+                             "text-only")
     parser.add_argument("--stt", choices=("voxtype", "whisper"),
                         help="STT backend for --voice; default voxtype "
                              "(same engine as local dictation), "
@@ -615,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.no_tools:
                     stream = build_stream(cfg, p)
                     for text in stream([user_msg],
-                                       model, system=cfg.system_prompt or None):
+                                       model, system=_system_prompt(cfg)):
                         print(text, end="", flush=True)
                     print()
                 else:
@@ -624,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
                         [user_msg],
                         model, _default_registry(),
                         emit=lambda t: print(t, end="", flush=True),
-                        system=cfg.system_prompt or None,
+                        system=_system_prompt(cfg),
                     )
                     print()
             except (ProviderError, ConfigError, AgentError) as exc:
@@ -652,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
                 model_override=args.model,
                 provider_override=args.provider,
                 tools=not args.no_tools,
+                voice=args.voice,
                 images=args.image or [],
             )
             return 0

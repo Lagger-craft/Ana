@@ -87,6 +87,8 @@ def parse_event(line: str) -> "tuple[str | None, str | None]":
     if event.get("type") == "say":
         text = str(event.get("text", ""))
         return None, (text if text.strip() else None)
+    if event.get("type") == "quit":
+        return "quit", None
     return None, None
 
 

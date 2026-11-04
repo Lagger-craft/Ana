@@ -30,6 +30,14 @@ class TestEventParsing:
         state, subtitle = parse_event('{"type": "frobnicate"}')
         assert state is None and subtitle is None
 
+    def test_quit_event_is_recognized(self):
+        # The overlay's fifo loop branches on state == "quit"; parse_event
+        # must surface it (it used to fall through to (None, None), so the
+        # window never closed and the process lingered).
+        state, subtitle = parse_event('{"type": "quit"}')
+        assert state == "quit"
+        assert subtitle is None
+
 
 class TestStateFallback:
     def test_unknown_name_falls_back_to_idle(self):
@@ -151,14 +159,20 @@ class TestReplWaifuEvents:
         monkeypatch.setattr("ana.waifu.waifu_send", events.append)
         return events
 
-    def test_reply_sends_say_event(self, cfg, sent):
+    def test_reply_brackets_turn_with_talk_and_idle(self, cfg, sent):
         run_repl(cfg_path=cfg, lines=["hola", "/exit"],
                  stream=lambda msgs, model, system=None: iter(["hola!"]))
-        assert sent == [{"type": "say", "text": "hola!"}]
+        assert sent == [
+            {"type": "state", "state": "talk"},
+            {"type": "say", "text": "hola!"},
+            {"type": "state", "state": "idle"},
+            {"type": "quit"},   # closing the chat closes the overlay
+        ]
 
     def test_failed_turn_sends_no_stale_say(self, cfg, sent):
         # turn 1 ok, turn 2 fails: the rollback leaves the OLD assistant
-        # reply as history[-1] — the waifu must NOT hear it again.
+        # reply as history[-1] — the waifu must NOT hear it again, but
+        # both turns still bracket with talk/idle so she never sticks.
         replies = iter([iter(["uno"]), ProviderError("boom")])
 
         def stream(msgs, model, system=None):
@@ -168,15 +182,22 @@ class TestReplWaifuEvents:
             return item
 
         run_repl(cfg_path=cfg, lines=["a", "b", "/exit"], stream=stream)
-        assert sent == [{"type": "say", "text": "uno"}]
+        assert sent == [
+            {"type": "state", "state": "talk"},
+            {"type": "say", "text": "uno"},
+            {"type": "state", "state": "idle"},
+            {"type": "state", "state": "talk"},
+            {"type": "state", "state": "idle"},
+            {"type": "quit"},   # closing the chat closes the overlay
+        ]
 
-    def test_voice_off_sends_say_without_state(self, cfg, sent):
-        run_repl(cfg_path=cfg, lines=["hola", "/exit"],
-                 stream=lambda msgs, model, system=None: iter(["hola!"]),
-                 voice=False)
-        assert sent == [{"type": "say", "text": "hola!"}]
+    def test_session_without_turns_only_sends_quit(self, cfg, sent):
+        # commands only (no chat turn): nothing but the closing quit.
+        run_repl(cfg_path=cfg, lines=["/exit"],
+                 stream=lambda msgs, model, system=None: iter([]))
+        assert sent == [{"type": "quit"}]
 
-    def test_voice_reply_wraps_speak_with_talk_then_idle(self, cfg, sent):
+    def test_voice_turn_stays_talk_until_spoken_then_idle(self, cfg, sent):
         class V:
             def record(self, max_seconds, press):
                 raise AssertionError("typed turn must not record")
@@ -191,10 +212,13 @@ class TestReplWaifuEvents:
         run_repl(cfg_path=cfg, lines=["hola", "/exit"],
                  stream=lambda msgs, model, system=None: iter(["hola!"]),
                  voice=True, voice_fx=V())
+        # talk starts at turn start and stays through the speak; the
+        # single idle closes the whole turn.
         assert sent == [
-            {"type": "say", "text": "hola!"},
             {"type": "state", "state": "talk"},
+            {"type": "say", "text": "hola!"},
             {"type": "state", "state": "idle"},
+            {"type": "quit"},   # closing the chat closes the overlay
         ]
         assert events == [("spoken", "hola!")]
 
@@ -215,7 +239,8 @@ class TestReplWaifuEvents:
             cfg_path=cfg, lines=["hola", "/exit"],
             stream=lambda msgs, model, system=None: iter(["hola!"]),
             voice=True, voice_fx=V())
-        assert sent[-1] == {"type": "state", "state": "idle"}
+        assert sent[-1] == {"type": "quit"}
+        assert {"type": "state", "state": "idle"} in sent
         assert history[-1] == {"role": "assistant", "content": "hola!"}
 
 

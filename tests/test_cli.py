@@ -250,6 +250,47 @@ class TestImageAttachment:
 
 
 
+class TestVoiceDefaultOn:
+    """Voice is ON by default; --no-voice is the opt-out (user request)."""
+
+    @staticmethod
+    def _fake_repl(monkeypatch):
+        import ana.cli as cli
+        seen = {}
+
+        def fake(cfg_path, **kw):
+            seen.update(kw)
+            return []
+
+        monkeypatch.setattr(cli, "run_repl", fake)
+        return seen
+
+    def test_repl_starts_with_voice_on_by_default(self, cfg, monkeypatch):
+        seen = self._fake_repl(monkeypatch)
+        assert main(["--config", str(cfg)]) == 0
+        assert seen["voice"] is True
+
+    def test_no_voice_flag_starts_text_only(self, cfg, monkeypatch):
+        seen = self._fake_repl(monkeypatch)
+        assert main(["--config", str(cfg), "--no-voice"]) == 0
+        assert seen["voice"] is False
+
+    def test_tui_starts_with_voice_on_by_default(self, cfg, monkeypatch):
+        import ana.tui as tui_mod
+        seen = {}
+
+        class FakeApp:
+            def __init__(self, *args, **kw):
+                seen.update(kw)
+
+            def run(self):
+                return None
+
+        monkeypatch.setattr(tui_mod, "AnaApp", FakeApp)
+        tui_mod.run_tui(str(cfg))
+        assert seen["voice"] is True
+
+
 class TestVisionModel:
     def test_pick_model_returns_vision_model_when_images_present(self):
         from ana.cli import _model_for_turn

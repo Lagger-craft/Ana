@@ -102,6 +102,8 @@ class _Proc:
 
 
 def _patch_run(monkeypatch, proc):
+    import shutil as _shutil
+
     import ana.voice.stt as stt
     seen = {}
 
@@ -110,7 +112,17 @@ def _patch_run(monkeypatch, proc):
         seen["kw"] = kw
         return proc
 
+    # The real voxtype CLI is machine-specific (AUR/Omarchy); resolve it
+    # to a stable fake path so transcribe() reaches _run on any machine.
+    real_which = _shutil.which
+
+    def fake_which(name, *args, **kwargs):
+        if name == "voxtype":
+            return "/fake/voxtype"
+        return real_which(name, *args, **kwargs)
+
     monkeypatch.setattr(stt, "_run", fake_run)
+    monkeypatch.setattr(_shutil, "which", fake_which)
     return seen
 
 
@@ -780,15 +792,8 @@ class TestMainVoiceFlag:
         assert main(["--config", str(cfg), "--voice"]) == 0
         assert seen["voice"] is True
 
-    def test_voice_flag_defaults_off(self, cfg, monkeypatch):
-        import ana.cli as cli
-
-        seen = {}
-        monkeypatch.setattr(
-            cli, "run_repl",
-            lambda cfg_path, **kw: seen.update(kw) or [])
-        assert main(["--config", str(cfg)]) == 0
-        assert seen["voice"] is False
+    # defaults-off removed: voice now defaults ON (user request) —
+    # covered by tests/test_cli.py::TestVoiceDefaultOn (--no-voice too).
 
 
 def _ok_proc():

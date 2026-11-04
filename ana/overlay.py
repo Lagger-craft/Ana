@@ -195,7 +195,7 @@ def run_overlay() -> int:
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     avatar = Gtk.Image()
     avatar.set_pixel_size(avatar_size())
-    subtitle = Gtk.Label(label="Ana 👋 · /say on the way")
+    subtitle = Gtk.Label(label="Ana 👋")
     subtitle.set_wrap(True)
     subtitle.set_max_width_chars(46)
     box.append(avatar)
@@ -229,10 +229,23 @@ def run_overlay() -> int:
                 placeholders[name] = fh.name
         return placeholders[name]
 
+    # current frame state: apply() records it, the blink timer only
+    # blinks while idle and always restores THIS state (never a stale
+    # idle while Ana is talking)
+    state_holder = [WaifuState.IDLE.value]
+
     def apply(state_name: str, text: str | None) -> None:
         if text is not None:
             subtitle.set_text(text)
+        if not state_name:
+            # subtitle-only event (say): never touch the avatar — the
+            # old code fell into placeholder_file("") and flashed a gray
+            # box over the current frame on every reply
+            _dbg("say: subtitle only, avatar untouched")
+            return
+        state_holder[0] = state_name
         png = resolve_asset(state_name)
+        _dbg("apply state=%s -> %s", state_name, png)
         avatar.set_from_file(str(png) if png is not None
                              else placeholder_file(state_name))
 
@@ -259,7 +272,16 @@ def run_overlay() -> int:
         GLib.idle_add(apply, state_name, text)
 
     def fifo_reader():
-        """FIFO loop (blocks only off the loop; reopens after EOF)."""
+        """FIFO loop (blocks only off the loop).
+
+        The read fd stays OPEN for the overlay's whole life. The old
+        code closed it on every writer EOF and slept 0.5s before
+        reopening — a fast producer (piped /exit arriving milliseconds
+        after the turn's last event) then hit ENXIO and the event was
+        dropped, so the closing `quit` never arrived. Holding the fd
+        makes every writer connect instantly; ENXIO can only happen
+        when NO reader holds the FIFO at all.
+        """
         import time
 
         from .waifu import fifo_path
@@ -280,9 +302,12 @@ def run_overlay() -> int:
                     time.sleep(0.05)
                     continue
                 except OSError:
-                    break
-                if not chunk:   # writer closed; wait for the next
-                    break
+                    break  # fd broken: fall through to reopen below
+                if not chunk:
+                    # no writer attached right now — keep waiting on the
+                    # SAME fd so the next writer connects immediately
+                    time.sleep(0.05)
+                    continue
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
@@ -291,6 +316,9 @@ def run_overlay() -> int:
                         state_name, subtitle = parse_event(text)
                         if state_name == "quit":
                             GLib.idle_add(window.destroy)
+                            # destroy() alone never stops _loop.run(): the
+                            # process would linger invisibly after quit
+                            GLib.idle_add(lambda: (_loop.quit(), False)[1])
                             return
                         if state_name is not None:
                             map_apply(state_name, subtitle)
@@ -304,6 +332,11 @@ def run_overlay() -> int:
     import random as _random
 
     def _blink_and_schedule():
+        if state_holder[0] != WaifuState.IDLE.value:
+            # mid-talk/mid-state: blinking would clobber the current
+            # frame (this is why talk.png never stuck) — just reschedule
+            _dbg("blink skipped: state=%s", state_holder[0])
+            return True
         blink = resolve_asset("blink")
         fallback = resolve_asset("idle")
         shown = str(blink) if blink is not None else (
@@ -322,8 +355,6 @@ def run_overlay() -> int:
         GLib.timeout_add(blink_ms, _back)
         return bool(_random.random() > 0.05)
 
-    state_holder = [WaifuState.IDLE.value]
-
     def _tick():
         if _blink_and_schedule():
             interval_ms2 = interval_ms
@@ -334,13 +365,11 @@ def run_overlay() -> int:
 
     GLib.timeout_add(interval_ms, _tick)
 
+    _loop = GLib.MainLoop()
     threading.Thread(target=fifo_reader, daemon=True).start()
     _dbg("fifo reader started; presenting")
     window.present()
-    _loop = GLib.MainLoop()
     _loop.run()
-    if state_id == WaifuState.IDLE:
-        pass  # nothing further: EOF ends the stream and with it the app
     return 0
 
 

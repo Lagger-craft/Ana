@@ -136,12 +136,18 @@ class ChatInput(Input if _TEXTUAL_INSTALLED else object):
 
 
 def run_tui(cfg_path, model_override=None, provider_override=None,
-            tools=True, images=None):
+            tools=True, images=None, voice=True):
     """Entry point for `ana tui` / `ana --tui`."""
     import_textual()
     AnaApp(cfg_path, model_override=model_override,
            provider_override=provider_override, tools=tools,
-           images=images).run()
+           voice=voice, images=images).run()
+    # Option B (user choice): closing the chat closes the overlay;
+    # ana-quick reopens a fresh one on the next session.
+    from .waifu import waifu_send
+    waifu_send({"type": "quit"})
+    from . import memory
+    memory.shutdown()  # best-effort: end Ana's Engram session at exit
 
 
 class AnaApp(App if _TEXTUAL_INSTALLED else object):
@@ -447,6 +453,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
             if self.stream is not None:
                 # the plain stream closure mirror: current_stream() -> fn
                 current_stream = lambda: self.stream  # noqa: E731
+            waifu_send({"type": "state", "state": "talk"})
             try:
                 state = _do_turn(
                     self.cfg, self.provider_override, None,
@@ -458,17 +465,16 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                          if (self.history
                              and self.history[-1]["role"] == "assistant")
                          else "")
-                if reply:
+                if reply and state in ("ok", "tools-unavailable"):
                     waifu_send({"type": "say", "text": reply})
                 if (self.voice_on and state in ("ok", "tools-unavailable")
                         and reply):
-                    waifu_send({"type": "state", "state": "talk"})
                     self.voice_fx_speak(reply)
-                    waifu_send({"type": "state", "state": "idle"})
             except Exception as exc:  # _do_turn notes expected errors
                 _dbg("turn raised: %s: %s", type(exc).__name__, exc)
                 self.emit_threaded(f"error: {exc}")
             finally:
+                waifu_send({"type": "state", "state": "idle"})
                 _dbg("turn done")
                 try:
                     self.call_from_thread(self._finish_turn, line)
