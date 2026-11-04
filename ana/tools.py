@@ -16,6 +16,7 @@ import httpx
 from datetime import datetime, timezone as _timezone
 from zoneinfo import ZoneInfo
 
+from . import memory
 from .agent import Tool, ToolRegistry
 
 TAVILY_URL = "https://api.tavily.com/search"
@@ -129,6 +130,36 @@ def _current_time(args: dict) -> str:
             + now.strftime("%A, %d %B %Y, %H:%M"))
 
 
+def _memory_save(args: dict) -> str:
+    """Persist via ana.memory; degrade to a one-line note, never raise.
+
+    run_agent only traps AgentError, so ANY other exception here kills
+    the whole turn — Engram being down (or memory disabled) must read
+    as text the model understands and stops retrying.
+    """
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    if not title or not content:
+        return ("memory_save needs a non-empty `title` and `content` "
+                "— nothing saved.")
+    kind = str(args.get("type") or "").strip() or "fact"
+    try:
+        return memory.save(title, content, type=kind)
+    except Exception as exc:
+        return f"memoria no disponible: {exc.__class__.__name__}: {exc}"
+
+
+def _memory_search(args: dict) -> str:
+    """Search via ana.memory; same graceful-degradation contract."""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return "memory_search needs a non-empty `query`."
+    try:
+        return memory.search(query)
+    except Exception as exc:
+        return f"memoria no disponible: {exc.__class__.__name__}: {exc}"
+
+
 def build_default_tools() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(Tool(
@@ -173,5 +204,47 @@ def build_default_tools() -> ToolRegistry:
         description="Return OS/kernel/python/load/CPU info about this machine.",
         parameters={"type": "object", "properties": {}},
         fn=_system_info,
+    ))
+    # Ana's own Engram-backed memory (namespace: ana-asistente)
+    reg.register(Tool(
+        name="memory_save",
+        description=(
+            "Save a durable fact or preference about the user (name, likes, "
+            "dislikes, workflow, recurring context) to Ana's long-term "
+            "memory so FUTURE sessions remember it. Do not store transient "
+            "details of the current chat."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string",
+                          "description": "short label for the memory"},
+                "content": {"type": "string",
+                            "description": "the durable fact or preference "
+                                           "to remember"},
+                "type": {"type": "string",
+                         "enum": ["fact", "preference", "persona"],
+                         "description": "kind of memory: fact | preference | "
+                                        "persona (default: fact)"},
+            },
+            "required": ["title", "content"],
+        },
+        fn=_memory_save,
+    ))
+    reg.register(Tool(
+        name="memory_search",
+        description=(
+            "Search Ana's long-term memory — recollections saved in previous "
+            "sessions — and return the matches. Use it before answering "
+            "personal questions to recall what you already know about the "
+            "user."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "what to look for"},
+            },
+            "required": ["query"],
+        },
+        fn=_memory_search,
     ))
     return reg

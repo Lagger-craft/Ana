@@ -11,7 +11,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
 | **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
-| **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, opt-in) |
+| **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, on by default) |
 | **3** ✅ | images: local vision (Repl `/img`, one-shot `--image`), vision_model auto-pick |
 | **4** ✅ | TUI (Textual): full-screen chat, same turn engine; opt-in `.tui` extra |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
@@ -125,7 +125,9 @@ If a provider rejects the tools payload (e.g. a small local model), Ana
 retries the turn without tools and keeps tools off for the session;
 system tools are read-only for now (`hyprctl ... -j`, no dispatch).
 Built-ins include `current_time` (the model never guesses the time —
-it calls the tool), `system_info` and `web_search` (Tavily key).
+it calls the tool), `system_info`, `web_search` (Tavily key) and Ana's
+own memory tools `memory_save` / `memory_search` (Engram — see
+[Memory (Engram)](#memory-engram)).
 
 ### TUI (Phase 4)
 
@@ -161,7 +163,9 @@ Knobs: `$ANA_WAIFU_MONITOR` pins the output (default: NOT the avoid
 one; `$ANA_WAIFU_AVOID`, default DP-1 for the gaming screen),
 `$ANA_WAIFU_SIZE` (px edge, default 220), `$ANA_WAIFU_BLINK"
 2:80". Events: JSON lines on the FIFO — `say` sets the subtitle,
-`state` swaps idle/talk/blink, `quit` closes the window.
+`state` swaps idle/talk/blink, `quit` closes the window. The REPL and
+the TUI send `quit` when they exit, so the overlay closes with the chat
+and `scripts/ana-quick` reopens a fresh one next time.
 
 **Who sends them:** every frontend that talks to Ana — both `ana tui`
 and the classic REPL (`ana`) push each reply as a `say` event, and voice
@@ -220,8 +224,8 @@ config — for labwc (`~/.config/rc.xml`):
 Bidirectional voice, **fully local** (S9/S10): voxtype for
 speech-to-text, Piper for text-to-speech with a Spanish voice. Nothing is
 sent to the cloud — recording, transcription, synthesis and playback all
-happen on this machine. Voice is opt-in per session; plain text mode is
-unchanged.
+happen on this machine. Voice is ON by default; `/voice off` (or
+`ana --no-voice`) gives a text-only session.
 
 ### Speech-to-text backend
 
@@ -283,7 +287,8 @@ export ANA_PIPER_MODEL=/path/to/es_XXXX-voice.onnx
 ### Usage
 
 ```sh
-.venv/bin/ana --provider ollama --voice   # start in voice mode
+.venv/bin/ana --provider ollama             # voice on by default
+# add --no-voice for a text-only session
 ```
 
 In the REPL, `/voice on|off|status` toggles voice for the session:
@@ -349,6 +354,41 @@ append it to a file. `--stt` and `--config` work as everywhere else:
 All local, no cloud STT/TTS: mic audio goes straight to faster-whisper
 (CPU, `small` model by default) and replies are synthesized by Piper on
 this machine. The recorded WAV is deleted right after transcription.
+
+## Memory (Engram)
+
+Ana keeps her own persistent memory, backed by the locally running
+Engram server. Her recollections live in a SEPARATE namespace — project
+`ana-asistente` (scope `project`) — so Ana's memories never mix with
+your own Engram memories on the same server.
+
+Two surfaces:
+
+- **Tools the model drives**: `memory_save` (a short `title`, the
+durable `content`, and a `type` of `fact` | `preference` | `persona`)
+stores facts about you for FUTURE sessions; `memory_search` (a
+`query`) brings them back formatted as `- [type] **title**: content`
+lines, or an honest "no encontré recuerdos..." when nothing matches.
+- **Session context**: at session start Ana's recent memory is
+prepended to the system prompt — the REPL, `-m` one-shot and the TUI
+all share the same turn engine, and the context is fetched at most
+once per process.
+
+Knobs (all optional):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `ANA_ENGRAM_URL` | `http://127.0.0.1:7437` | Engram server base URL |
+| `ANA_MEMORY_PROJECT` | `ana-asistente` | Ana's namespace |
+| `ANA_MEMORY` | (on) | `ANA_MEMORY=0` disables everything |
+
+Graceful degradation: every call has a short (3 s) timeout, and if
+Engram is down or slow Ana prints a one-line note
+(`memoria no disponible: ...`) and keeps the turn going in text mode —
+a memory failure never crashes or stalls the chat. With `ANA_MEMORY=0`
+the tools answer a one-line `memoria deshabilitada ...` note and the
+system prompt stays exactly as it was. The REPL and the TUI end her
+Engram session best-effort when they exit.
 
 ## Tests
 

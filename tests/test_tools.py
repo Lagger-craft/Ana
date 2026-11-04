@@ -1,4 +1,5 @@
-"""Tests for ana.tools — Tavily web search, hyprctl read-only, system info."""
+"""Tests for ana.tools — Tavily web search, hyprctl read-only, system info,
+Engram-backed memory tools."""
 
 import sys
 
@@ -147,7 +148,7 @@ class TestToolInstances:
         assert set(reg.names()) == {
             "web_search", "hypr_active_window", "hypr_workspaces",
             "hypr_monitors", "hypr_version", "hypr_devices", "system_info",
-            "current_time"}
+            "current_time", "memory_save", "memory_search"}
 
 
 # --------------------------------------------- current_time (S8+)
@@ -169,6 +170,93 @@ class TestCurrentTime:
         monkeypatch.setenv("TZ", "UTC")
         out = tools.call("current_time", {"timezone": "Europe/Madrid"})
         assert "T" in out
+
+
+# --------------------------------------------- memory tools (Engram)
+
+
+class TestMemoryTools:
+    def test_registered_with_schemas(self, tools):
+        assert "memory_save" in tools.names()
+        assert "memory_search" in tools.names()
+        spec = {t["function"]["name"]: t["function"]
+                for t in tools.to_spec("chat")}
+        save = spec["memory_save"]
+        assert save["parameters"]["required"] == ["title", "content"]
+        props = save["parameters"]["properties"]
+        assert props["type"]["enum"] == ["fact", "preference", "persona"]
+        # the description must steer the model to FUTURE sessions
+        assert "future" in save["description"].lower()
+        search = spec["memory_search"]["parameters"]
+        assert search["required"] == ["query"]
+        assert "query" in search["properties"]
+
+    def test_save_posts_through_the_memory_seam(self, tools, monkeypatch):
+        import ana.memory as memory
+        calls = []
+
+        def fake_post(path, body):
+            calls.append((path, body))
+            return {"id": 7, "status": "saved"}
+
+        monkeypatch.setattr(memory, "_post", fake_post)
+        out = tools.call("memory_save", {"title": "coffee",
+                                         "content": "likes flat white",
+                                         "type": "preference"})
+        assert calls[0][0] == "/sessions"
+        assert calls[1][1]["title"] == "coffee"
+        assert calls[1][1]["type"] == "preference"
+        assert calls[1][1]["project"] == "ana-asistente"
+        assert "coffee" in out
+
+    def test_save_without_title_or_content_says_so(self, tools, monkeypatch):
+        import ana.memory as memory
+        monkeypatch.setattr(memory, "_post",
+                            lambda *a, **k: pytest.fail("nothing to save"))
+        out = tools.call("memory_save", {"title": "", "content": ""})
+        assert isinstance(out, str)
+        assert "title" in out and "content" in out
+
+    def test_save_degrades_when_engram_is_down(self, tools, monkeypatch):
+        import ana.memory as memory
+
+        def down(path, body):
+            raise memory.MemoryUnavailable("engram down")
+
+        monkeypatch.setattr(memory, "_post", down)
+        out = tools.call("memory_save", {"title": "t", "content": "c"})
+        assert isinstance(out, str)               # a note, never an exception
+        assert "memoria no disponible" in out
+
+    def test_search_returns_formatted_hits(self, tools, monkeypatch):
+        import ana.memory as memory
+
+        def fake_get(path, **params):
+            return [{"type": "fact", "title": "cat",
+                     "content": "has a cat named Momo"}]
+
+        monkeypatch.setattr(memory, "_get", fake_get)
+        out = tools.call("memory_search", {"query": "pet"})
+        assert out == "- [fact] **cat**: has a cat named Momo"
+
+    def test_search_degrades_when_engram_is_down(self, tools, monkeypatch):
+        import ana.memory as memory
+
+        def down(path, **params):
+            raise memory.MemoryUnavailable("engram down")
+
+        monkeypatch.setattr(memory, "_get", down)
+        out = tools.call("memory_search", {"query": "pet"})
+        assert isinstance(out, str)
+        assert "memoria no disponible" in out
+
+    def test_disabled_memory_returns_one_line_note(self, tools, monkeypatch):
+        monkeypatch.setenv("ANA_MEMORY", "0")
+        for name, args in (("memory_save", {"title": "t", "content": "c"}),
+                           ("memory_search", {"query": "q"})):
+            out = tools.call(name, args)
+            assert out.count("\n") == 0
+            assert "memoria deshabilitada" in out
 
 
 class TestTimezoneDefault:
