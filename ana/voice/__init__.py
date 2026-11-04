@@ -4,12 +4,15 @@ Public names:
 - VoiceError: raised when a voice dependency, device, or model is missing
 - WhisperSTT: faster-whisper speech-to-text wrapper (lazy import)
 - record_to_wav: record the microphone to a WAV file via arecord
-- PiperTTS: Piper text-to-speech synthesis and playback
+- KokoroTTS: kokoro-onnx text-to-speech (default backend, lazy import)
+- PiperTTS: Piper text-to-speech (ANA_TTS=piper / --tts piper)
+- build_tts: TTS backend resolver (explicit arg > $ANA_TTS > kokoro)
 """
 
 from .errors import VoiceError
+from .kokoro import KokoroTTS
 from .stt import WhisperSTT, record_to_wav
-from .tts import PiperTTS, resolve_voice
+from .tts import PiperTTS, build_tts, resolve_voice
 
-__all__ = ["VoiceError", "WhisperSTT", "record_to_wav", "PiperTTS",
-           "resolve_voice"]
+__all__ = ["VoiceError", "WhisperSTT", "record_to_wav", "KokoroTTS",
+           "PiperTTS", "build_tts", "resolve_voice"]

@@ -24,8 +24,9 @@ files in a ``finally`` on every exit path.
 
 The transcript runs through the EXISTING turn engine — ``run_repl``
 with ``lines=[transcript, "/exit"]`` and ``voice=True`` — so tools,
-provider config, error rollback, Piper TTS and the waifu say/talk/idle
-events (T34) all come for free; this module is orchestration only.
+provider config, error rollback, TTS (Kokoro by default) and the waifu
+say/talk/idle events (T34) all come for free; this module is
+orchestration only.
 
 Headless feedback: a tiny ``notify()`` via ``notify-send`` (all
 failures swallowed silently) and one ``waifu_send`` say event at
@@ -191,15 +192,15 @@ def _make_emit():
 # ----------------------------------------------------- orchestration
 
 
-def run_talk(cfg_path, stt: str | None = None, voice_fx=None,
-             notify_fn=None, emit=None) -> int:
+def run_talk(cfg_path, stt: str | None = None, tts: str | None = None,
+             voice_fx=None, notify_fn=None, emit=None) -> int:
     """One ``ana talk`` invocation: toggle, record, turn, notify.
 
     Returns 0 on every normal path (fresh round, stop request, answering
     no-op, empty transcript) and 1 on a voice failure. ``voice_fx`` and
     ``notify_fn`` are the test seams; the defaults are the live
-    ``_DefaultVoice`` (T18 media pause, voxtype STT, Piper TTS) and
-    ``notify``.
+    ``_DefaultVoice`` (T18 media pause, voxtype STT, Kokoro TTS via
+    ``build_tts``) and ``notify``.
     """
     notify_fn = notify_fn or notify
     state = read_state()
@@ -220,7 +221,7 @@ def run_talk(cfg_path, stt: str | None = None, voice_fx=None,
     runtime = _runtime_dir()
     runtime.mkdir(parents=True, exist_ok=True)
     talk_stop_path().unlink(missing_ok=True)  # stale stop from a crash
-    vfx = voice_fx if voice_fx is not None else _DefaultVoice(stt)
+    vfx = voice_fx if voice_fx is not None else _DefaultVoice(stt, tts)
     emit_fn = emit or _make_emit()
 
     try:
@@ -244,7 +245,7 @@ def run_talk(cfg_path, stt: str | None = None, voice_fx=None,
             notify_fn("Ana", "(no escuché nada)")
             return 0
         # ONE turn engine: tools, provider config, error rollback,
-        # Piper reply and the waifu say/talk/idle events all ride
+        # the spoken reply and the waifu say/talk/idle events all ride
         # run_repl (T34) — talk.py never forks its own turn path.
         history = run_repl(cfg_path, lines=[heard, "/exit"], voice=True,
                            voice_fx=vfx, emit=emit_fn)

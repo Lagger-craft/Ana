@@ -12,7 +12,7 @@ ana = "ana.cli:main"
 dev = ["pytest>=8", "pytest-asyncio>=1", "textual>=0.86", "numpy>=1.26"]
 # Phase 2 voice (opt-in, local-only). Bounds kept permissive; see README
 # "Voice (Phase 2)". Not installed by default — install with: pip install -e '.[voice]'
-voice = ["faster-whisper>=1.0", "piper-tts"]
+voice = ["faster-whisper>=1.0", "piper-tts", "kokoro-onnx>=0.4"]
 # Phase 4 TUI (opt-in). install with: pip install -e '.[tui]'
 tui = ["textual>=0.86"]
 

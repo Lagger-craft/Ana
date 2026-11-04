@@ -1,7 +1,8 @@
 """Tests for Phase 2 voice (S9/S10): STT, TTS, and the CLI voice loop.
 
 Covers ana.voice.stt (WhisperSTT, record_to_wav), ana.voice.tts
-(PiperTTS, resolve_voice) and the run_repl voice seam (/voice, --voice).
+(PiperTTS, resolve_voice, build_tts), ana.voice.kokoro (KokoroTTS) and
+the run_repl voice seam (/voice, --voice, --stt, --tts).
 """
 
 import os
@@ -37,6 +38,35 @@ class TestCliSttFlag:
         assert main(["--voice", "--stt", "whisper"]) == 0
         assert seen["stt"] == "whisper"
         assert seen["voice"] is True
+
+
+class TestCliTtsFlag:
+    def test_flag_reaches_run_repl(self, monkeypatch):
+        import ana.cli as cli
+
+        seen = {}
+
+        def fake_repl(cfg_path, **kw):
+            seen.update(kw)
+            return []
+
+        monkeypatch.setattr(cli, "run_repl", fake_repl)
+        assert main(["--voice", "--tts", "piper"]) == 0
+        assert seen["tts"] == "piper"
+        assert seen["voice"] is True
+
+    def test_flag_reaches_run_talk(self, monkeypatch):
+        import ana.talk as talk_mod
+
+        seen = {}
+
+        def fake_talk(path, stt=None, tts=None):
+            seen.update(cfg=path, stt=stt, tts=tts)
+            return 0
+
+        monkeypatch.setattr(talk_mod, "run_talk", fake_talk)
+        assert main(["--tts", "piper", "talk"]) == 0
+        assert seen == {"cfg": seen["cfg"], "stt": None, "tts": "piper"}
 
 
 class TestMediaPauseAroundRecording:
@@ -586,6 +616,21 @@ class TestPiperTTS:
         kw = calls[0][1]
         assert kw["input"] == "¡Hola Ana!\n".encode("utf-8")
 
+    def test_speak_sanitizes_markdown_and_emojis_for_piper(self, monkeypatch):
+        # piper/espeak would read "**" and emojis literally (or choke):
+        # speak() must hand it clean prose.
+        import ana.voice.tts as tts
+
+        calls = []
+        monkeypatch.setattr(
+            tts, "_run", lambda cmd, **kw: calls.append((cmd, kw)) or None)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+
+        PiperTTS(voice="/models/es_AR-daniela-high.onnx").speak(
+            "**¡Hola!** 👋 ¿cómo estás?")
+
+        assert calls[0][1]["input"] == "¡Hola! ¿cómo estás?\n".encode("utf-8")
+
     def test_missing_piper_raises_actionable_voice_error(self, monkeypatch,
                                                          tmp_path):
         monkeypatch.setattr("shutil.which", lambda name: None)
@@ -638,6 +683,233 @@ class TestPiperTTS:
         msg = str(excinfo.value)
         assert ".local/share/piper" in msg
         assert "ANA_PIPER_MODEL" in msg
+
+
+# ------------------------------------------------------------- kokoro
+
+
+def _kokoro_model_dir(monkeypatch, tmp_path, empty=False):
+    """Point $ANA_KOKORO_DIR at a fake model dir (or an empty one).
+
+    The dir must hold kokoro-v1.0.onnx + voices-v1.0.bin; faking it
+    keeps every KokoroTTS test off the real ~/.local/share/kokoro.
+    """
+    root = tmp_path / "kokoro"
+    if not empty:
+        root.mkdir(exist_ok=True)
+        for name in ("kokoro-v1.0.onnx", "voices-v1.0.bin"):
+            (root / name).write_bytes(b"")
+    monkeypatch.setenv("ANA_KOKORO_DIR", str(root))
+    return root
+
+
+class TestKokoroTTS:
+    """KokoroTTS: sanitize → _synthesize seam → play_wav seam → cleanup.
+
+    No test loads the real model or plays real audio: synthesis and
+    playback are module-level seams, and the model dir is faked.
+    """
+
+    @staticmethod
+    def _fake_synth(monkeypatch, samples=None):
+        import ana.voice.kokoro as kokoro
+
+        if samples is None:
+            samples = np.linspace(-0.5, 0.5, 64).astype(np.float32)
+        seen = {}
+
+        def fake_synth(text, voice, lang):
+            seen["synth"] = (text, voice, lang)
+            return samples, 24000
+
+        monkeypatch.setattr(kokoro, "_synthesize", fake_synth)
+        return seen, samples
+
+    @staticmethod
+    def _fake_play(monkeypatch):
+        import ana.voice.kokoro as kokoro
+
+        seen = {}
+
+        def fake_play(wav, player=None):
+            seen["play"] = (str(wav), player)
+            with wave.open(str(wav), "rb") as wf:
+                seen["frames"] = wf.readframes(wf.getnframes())
+                seen["sr"] = wf.getframerate()
+
+        monkeypatch.setattr(kokoro, "play_wav", fake_play)
+        monkeypatch.setattr(kokoro, "find_player", lambda: "/fake/paplay")
+        return seen
+
+    def test_speak_sanitizes_text_before_synthesis(self, monkeypatch,
+                                                    tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        _kokoro_model_dir(monkeypatch, tmp_path)
+        seen, _ = self._fake_synth(monkeypatch)
+        self._fake_play(monkeypatch)
+
+        kokoro.KokoroTTS().speak("**¡Hola!** 👋 ¿cómo estás?")
+
+        assert seen["synth"][0] == "¡Hola! ¿cómo estás?"
+
+    def test_default_voice_and_lang(self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        monkeypatch.delenv("ANA_KOKORO_VOICE", raising=False)
+        monkeypatch.delenv("ANA_KOKORO_LANG", raising=False)
+        _kokoro_model_dir(monkeypatch, tmp_path)
+        seen, _ = self._fake_synth(monkeypatch)
+        self._fake_play(monkeypatch)
+
+        kokoro.KokoroTTS().speak("hola")
+
+        assert seen["synth"][1:] == ("ef_dora", "es")
+
+    def test_env_knobs_reach_synthesis(self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        _kokoro_model_dir(monkeypatch, tmp_path)  # ANA_KOKORO_DIR knob
+        monkeypatch.setenv("ANA_KOKORO_VOICE", "em_santa")
+        monkeypatch.setenv("ANA_KOKORO_LANG", "es")
+        seen, _ = self._fake_synth(monkeypatch)
+        self._fake_play(monkeypatch)
+
+        kokoro.KokoroTTS().speak("hola")
+
+        assert seen["synth"][1:] == ("em_santa", "es")
+
+    def test_explicit_voice_wins_over_env(self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        _kokoro_model_dir(monkeypatch, tmp_path)
+        monkeypatch.setenv("ANA_KOKORO_VOICE", "em_santa")
+        seen, _ = self._fake_synth(monkeypatch)
+        self._fake_play(monkeypatch)
+
+        kokoro.KokoroTTS(voice="em_alex").speak("hola")
+
+        assert seen["synth"][1] == "em_alex"
+
+    def test_play_receives_synthesized_buffer(self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        _kokoro_model_dir(monkeypatch, tmp_path)
+        samples = np.array([0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+        self._fake_synth(monkeypatch, samples)
+        play = self._fake_play(monkeypatch)
+
+        kokoro.KokoroTTS().speak("hola")
+
+        wav, player = play["play"]
+        assert player == "/fake/paplay"
+        assert play["sr"] == 24000
+        pcm = np.frombuffer(play["frames"], dtype=np.int16)
+        np.testing.assert_array_equal(pcm, [16383, -16383, 32767, -32767])
+        assert not Path(wav).exists()  # temp wav removed after playback
+
+    def test_missing_package_raises_actionable_voice_error(
+            self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        _kokoro_model_dir(monkeypatch, tmp_path)
+        monkeypatch.setitem(sys.modules, "kokoro_onnx", None)
+        self._fake_play(monkeypatch)
+
+        with pytest.raises(VoiceError) as excinfo:
+            kokoro.KokoroTTS().speak("hola")
+        msg = str(excinfo.value)
+        assert "kokoro_onnx not installed" in msg
+        assert "pip install kokoro-onnx" in msg
+
+    def test_missing_model_files_raises_actionable_voice_error(
+            self, monkeypatch, tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        root = _kokoro_model_dir(monkeypatch, tmp_path, empty=True)
+
+        def boom(*a, **kw):
+            raise AssertionError("synthesis must not run without models")
+
+        monkeypatch.setattr(kokoro, "_synthesize", boom)
+
+        with pytest.raises(VoiceError) as excinfo:
+            kokoro.KokoroTTS().speak("hola")
+        msg = str(excinfo.value)
+        assert "kokoro-v1.0.onnx" in msg and "voices-v1.0.bin" in msg
+        assert str(root) in msg
+        assert "thewh1teagle/kokoro-onnx" in msg
+        assert "model-files-v1.0" in msg
+
+    def test_model_dir_env_override_and_default(self, monkeypatch,
+                                                 tmp_path):
+        import ana.voice.kokoro as kokoro
+
+        monkeypatch.delenv("ANA_KOKORO_DIR", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))  # Path.home() reads HOME
+        assert kokoro.model_dir() == (tmp_path / ".local" / "share"
+                                      / "kokoro")
+        monkeypatch.setenv("ANA_KOKORO_DIR", "/custom/kokoro")
+        assert kokoro.model_dir() == Path("/custom/kokoro")
+
+
+class TestBuildTTS:
+    def test_explicit_backend_wins_over_env(self, monkeypatch):
+        from ana.voice.tts import build_tts
+        import ana.voice.kokoro as kokoro
+
+        monkeypatch.setenv("ANA_TTS", "piper")
+        assert isinstance(build_tts("kokoro"), kokoro.KokoroTTS)
+
+    def test_env_backend_wins_over_default(self, monkeypatch):
+        from ana.voice.tts import build_tts
+
+        monkeypatch.setenv("ANA_TTS", "piper")
+        assert isinstance(build_tts(), PiperTTS)
+
+    def test_default_backend_is_kokoro(self, monkeypatch):
+        from ana.voice.tts import build_tts
+        import ana.voice.kokoro as kokoro
+
+        monkeypatch.delenv("ANA_TTS", raising=False)
+        assert isinstance(build_tts(), kokoro.KokoroTTS)
+
+    def test_unknown_backend_raises_actionable(self, monkeypatch):
+        from ana.voice.tts import build_tts
+
+        monkeypatch.delenv("ANA_TTS", raising=False)
+        with pytest.raises(VoiceError) as excinfo:
+            build_tts("muleto")
+        msg = str(excinfo.value)
+        assert "unknown TTS backend" in msg
+        assert "kokoro, piper" in msg
+
+    def test_default_voice_speak_routes_through_build_tts(
+            self, monkeypatch):
+        """_DefaultVoice.speak must resolve through build_tts, never a
+        hardcoded PiperTTS() — that was the old construction site."""
+        import ana.cli as cli
+        import ana.voice.tts as tts_mod
+
+        seen = {}
+
+        class FakeTTS:
+            def speak(self, text):
+                seen["text"] = text
+
+        # RED guard: the current code builds PiperTTS directly — fake it
+        # so this test can never trigger real synthesis/playback.
+        monkeypatch.setattr(
+            tts_mod, "PiperTTS",
+            lambda *a, **kw: seen.update(used="piper") or FakeTTS())
+        monkeypatch.setattr(
+            tts_mod, "build_tts",
+            lambda backend=None: seen.update(backend=backend) or FakeTTS(),
+            raising=False)
+
+        cli._DefaultVoice(tts_backend="piper").speak("hola")
+
+        assert seen == {"backend": "piper", "text": "hola"}
 
 
 # ------------------------------------------------------------ cli loop
@@ -775,6 +1047,25 @@ class TestVoiceLoop:
                            stream=stream_ok(), voice=True, voice_fx=fx)
         out = capsys.readouterr().out
         assert "(voice unavailable: piper not installed" in out
+        assert history[-1] == {"role": "assistant", "content": "hola!"}
+
+    def test_ana_tts_kokoro_degrades_at_speak_time_not_startup(
+            self, cfg, tmp_path, monkeypatch, capsys):
+        """ANA_TTS=kokoro on a machine without models must not crash the
+        REPL at startup: the failure surfaces as (voice unavailable: …)
+        when the reply is spoken, and the turn itself survives."""
+        import ana.voice.tts as tts_mod
+
+        # RED guard: the current code ignores ANA_TTS and speaks with
+        # Piper — keep that path away from real synthesis/playback.
+        monkeypatch.setattr(tts_mod, "_piper_binary", lambda: None)
+        monkeypatch.setenv("ANA_TTS", "kokoro")
+        monkeypatch.setenv("ANA_KOKORO_DIR", str(tmp_path / "no-models"))
+
+        history = run_repl(cfg_path=cfg, lines=["hola", "/exit"],
+                           stream=stream_ok("hola!"), voice=True)
+        out = capsys.readouterr().out
+        assert "(voice unavailable: Kokoro model files missing" in out
         assert history[-1] == {"role": "assistant", "content": "hola!"}
 
 

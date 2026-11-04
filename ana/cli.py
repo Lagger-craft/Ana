@@ -74,6 +74,7 @@ def run_repl(
     voice_secs: float | None = None,
     voice_fx: object | None = None,
     stt: str | None = None,
+    tts: str | None = None,
     images: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
@@ -106,7 +107,8 @@ def run_repl(
     tools_on = tools
     active_registry: ToolRegistry | None = registry
     voice_on = voice
-    vfx = voice_fx if voice_fx is not None else _DefaultVoice(stt)
+    vfx = (voice_fx if voice_fx is not None
+           else _DefaultVoice(stt, tts))
     pending_images: list[str] = list(images or [])
 
     def press(timeout: float | None = None) -> bool:
@@ -299,17 +301,21 @@ def run_repl(
 
 
 class _DefaultVoice:
-    """Live voice backend: push-to-talk arecord → STT → Piper.
+    """Live voice backend: push-to-talk arecord → STT → TTS.
 
     STT backend resolution follows S11: $ANA_STT or the --stt flag;
-    default voxtype (falls back details in ana.voice.stt.build_stt).
+    default voxtype (details in ana.voice.stt.build_stt). TTS backend
+    resolution follows build_tts: $ANA_TTS or the --tts flag; default
+    kokoro, piper stays available via ANA_TTS=piper / --tts piper.
     Imports the voice modules lazily so plain text sessions never touch
     them. The recorded WAV is deleted as soon as transcription finishes
     (or if recording fails), so mic audio does not linger on disk.
     """
 
-    def __init__(self, stt_backend: str | None = None) -> None:
+    def __init__(self, stt_backend: str | None = None,
+                 tts_backend: str | None = None) -> None:
         self._stt_backend = stt_backend
+        self._tts_backend = tts_backend
 
     def record(self, max_seconds: float, press):
         import os
@@ -348,9 +354,9 @@ class _DefaultVoice:
             Path(wav).unlink(missing_ok=True)
 
     def speak(self, text: str) -> None:
-        from .voice.tts import PiperTTS
+        from .voice.tts import build_tts
 
-        PiperTTS().speak(text)
+        build_tts(self._tts_backend).speak(text)
 
 
 def _system_prompt(cfg: Config) -> str | None:
@@ -603,12 +609,16 @@ def main(argv: list[str] | None = None) -> int:
                         default=True,
                         help="voice mode (default ON): push-to-talk (Enter "
                              "starts/stops recording; local STT, replies "
-                             "are spoken via Piper); --no-voice starts "
-                             "text-only")
+                             "are spoken via the local TTS — Kokoro by "
+                             "default); --no-voice starts text-only")
     parser.add_argument("--stt", choices=("voxtype", "whisper"),
                         help="STT backend for --voice; default voxtype "
                              "(same engine as local dictation), "
                              "ANA_STT also works")
+    parser.add_argument("--tts", choices=("kokoro", "piper"),
+                        help="TTS backend for spoken replies; default "
+                             "kokoro (local, Spanish voices), "
+                             "ANA_TTS also works")
     parser.add_argument("--image", "-i", action="append", metavar="RUTA",
                         help="image to attach to -m (png/jpg/webp/gif); "
                              "the provider's vision_model is used for it")
@@ -669,7 +679,12 @@ def main(argv: list[str] | None = None) -> int:
             # under $XDG_RUNTIME_DIR/ana/, toggle per key press
             from .talk import run_talk
 
-            return run_talk(cfg_path, stt=args.stt)
+            talk_kw = {"stt": args.stt}
+            if args.tts is not None:
+                # only an explicit --tts rides along: run_talk keeps a
+                # minimal (path, stt) call contract for its wrappers
+                talk_kw["tts"] = args.tts
+            return run_talk(cfg_path, **talk_kw)
 
         if args.tui or args.command == "tui":
             from .tui import run_tui
@@ -691,6 +706,7 @@ def main(argv: list[str] | None = None) -> int:
             tools=not args.no_tools,
             voice=args.voice,
             stt=args.stt,
+            tts=args.tts,
             images=args.image or [],
         )
         return 0

@@ -27,7 +27,7 @@ ANA_TUI_HELP = (
     "/provider [name]   switch provider from the config\n"
     "/tools [on|off|list]   tool calling\n"
     "/voice [on|off|status]   voice: empty-Enter = push-to-talk,\n"
-    "                   replies spoken (voxtype STT, Piper TTS)\n"
+    "                   replies spoken (voxtype STT, Kokoro TTS)\n"
     "/img <ruta>        attach an image to the next message\n"
     "/new               clear this conversation\n"
     "/exit (Ctrl+Q)     leave\n"
@@ -169,7 +169,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
                  provider_override=None, tools=True, registry=None,
                  client_fx=None, stream=None, images=None,
                  max_rounds: int = 4, voice: bool = False,
-                 stt: str | None = None):
+                 stt: str | None = None, tts: str | None = None):
         super().__init__()
         self.cfg_path = cfg_path
         self.model_override = model_override
@@ -186,6 +186,7 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         self.voice_fx = None   # injected seam (tests) or the live default
         self.voice_on = voice
         self.stt = stt
+        self.tts = tts
         self._press_gate = None      # push-to-talk gate (None = not recording)
         self._entry_history: list[str] = []
         self.busy = True  # until the first mount finishes loading
@@ -334,8 +335,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         from .voice.stt import default_max_seconds
 
         gate = self._press_gate
-        vfx = self.voice_fx if self.voice_fx is not None else _DefaultVoice(
-            self.stt)
+        vfx = (self.voice_fx if self.voice_fx is not None
+               else _DefaultVoice(self.stt, self.tts))
         try:
             wav = vfx.record(default_max_seconds(), press=gate)
             heard = (vfx.transcribe(wav) or "").strip()
@@ -358,8 +359,8 @@ class AnaApp(App if _TEXTUAL_INSTALLED else object):
         try:
             from .cli import _DefaultVoice
 
-            vfx = self.voice_fx if self.voice_fx is not None else _DefaultVoice(
-                self.stt)
+            vfx = (self.voice_fx if self.voice_fx is not None
+                   else _DefaultVoice(self.stt, self.tts))
             vfx.speak(reply)
         except Exception as exc:
             self.emit_threaded(f"(voice unavailable: {exc})")

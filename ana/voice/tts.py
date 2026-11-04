@@ -1,12 +1,17 @@
-"""Local text-to-speech (Phase 2, S9/S10): Piper synthesis + playback.
+"""Local text-to-speech (Phase 2, S9/S10): TTS backend resolution.
 
 Public names:
 - VoiceError (re-exported from ana.voice.errors)
+- build_tts: backend resolver — explicit argument > $ANA_TTS > "kokoro"
+  (mirrors build_stt; KokoroTTS is imported lazily inside it).
 - PiperTTS: synthesize text with the ``piper`` binary and play the result
   with ``paplay`` (PipeWire/PulseAudio, default on Omarchy) falling back
-  to ``aplay``. The temporary WAV is deleted after playback.
+  to ``aplay``. The temporary WAV is deleted after playback. Selected
+  with ``ANA_TTS=piper`` / ``--tts piper``.
 - resolve_voice: pick the Piper voice model — $ANA_PIPER_MODEL first,
   else the first es_*.onnx under ~/.local/share/piper/.
+- find_player / play_wav: the shared paplay/aplay playback used by BOTH
+  PiperTTS and KokoroTTS (ana.voice.kokoro).
 - _run: module-level subprocess wrapper; tests monkeypatch this seam.
 """
 
@@ -20,8 +25,12 @@ import tempfile
 from pathlib import Path
 
 from .errors import VoiceError
+from ..waifu import sanitize_for_speech
 
-__all__ = ["VoiceError", "PiperTTS", "resolve_voice"]
+__all__ = ["VoiceError", "PiperTTS", "build_tts", "resolve_voice",
+           "find_player", "play_wav"]
+
+VALID_TTS_BACKENDS = ("kokoro", "piper")
 
 PIPER_MISSING_MSG = (
     "piper not installed — install piper and a Spanish voice, "
@@ -47,6 +56,34 @@ def _piper_binary() -> str | None:
     if venv_bin.is_file():
         return str(venv_bin)
     return None
+
+
+def find_player() -> str:
+    """The audio player: paplay (PipeWire/PulseAudio) or aplay (ALSA).
+
+    Raises VoiceError when neither is installed — shared by every TTS
+    backend so the message and lookup stay in one place.
+    """
+    player = shutil.which("paplay") or shutil.which("aplay")
+    if player is None:
+        raise VoiceError(
+            "no audio player found — paplay (PipeWire/PulseAudio) or "
+            "aplay (ALSA) is required to play replies")
+    return player
+
+
+def play_wav(wav: str | Path, player: str | None = None) -> None:
+    """Play a WAV file; raises VoiceError when playback fails.
+
+    ``player`` skips the PATH lookup when the caller already resolved
+    it (PiperTTS checks before synthesizing).
+    """
+    player = player or find_player()
+    try:
+        _run([player, str(wav)], check=True)
+    except subprocess.CalledProcessError as exc:
+        raise VoiceError(
+            f"playback failed ({player} exit {exc.returncode})") from None
 
 
 def resolve_voice() -> str:
@@ -90,11 +127,7 @@ class PiperTTS:
         if piper is None:
             raise VoiceError(PIPER_MISSING_MSG)
         voice = self.voice if self.voice is not None else resolve_voice()
-        player = shutil.which("paplay") or shutil.which("aplay")
-        if player is None:
-            raise VoiceError(
-                "no audio player found — paplay (PipeWire/PulseAudio) or "
-                "aplay (ALSA) is required to play replies")
+        player = find_player()
         with tempfile.TemporaryDirectory(prefix="ana-tts-") as tmp:
             wav = Path(tmp) / "reply.wav"
             try:
@@ -102,15 +135,33 @@ class PiperTTS:
                 # UTF-8 bytes so accented text survives the subprocess.
                 _run([piper, "--model", voice,
                       "--output_file", str(wav)],
-                     check=True, input=(text + "\n").encode("utf-8"))
+                     check=True,
+                     input=(sanitize_for_speech(text) + "\n")
+                     .encode("utf-8"))
             except subprocess.CalledProcessError as exc:
                 raise VoiceError(
                     f"piper synthesis failed (exit {exc.returncode})"
                 ) from None
-            try:
-                _run([player, str(wav)], check=True)
-            except subprocess.CalledProcessError as exc:
-                raise VoiceError(
-                    f"playback failed ({player} exit {exc.returncode})"
-                ) from None
+            play_wav(wav, player)
         # TemporaryDirectory cleaned up: the wav is gone after playback
+
+
+def build_tts(backend: str | None = None):
+    """Resolve the TTS backend: explicit arg > $ANA_TTS > "kokoro".
+
+    Construction is cheap and import-safe: KokoroTTS only loads
+    kokoro_onnx (and the model) at speak() time, so an ANA_TTS=kokoro
+    machine missing the package degrades at speak time instead of at
+    REPL startup.
+    """
+    name = (backend if backend is not None
+            else os.environ.get("ANA_TTS", "")).strip().lower() or "kokoro"
+    if name == "kokoro":
+        from .kokoro import KokoroTTS
+        return KokoroTTS()
+    if name == "piper":
+        return PiperTTS()
+    opts = ", ".join(VALID_TTS_BACKENDS)
+    raise VoiceError(
+        f"unknown TTS backend {name!r} — options: {opts} "
+        "(ANA_TTS / --tts)")

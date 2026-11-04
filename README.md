@@ -11,7 +11,7 @@ The full roadmap lives in `odd/tasks/assistant-core.md`:
 |---|---|
 | **0** ✅ | chat CLI, multi-provider config, streaming |
 | **1** ✅✨ | tool-calling: Tavily web search, Hyprland read-only queries, system info, graceful no-tools fallback |
-| **2** ✅ | voice loop: faster-whisper STT + Piper TTS (local, on by default) |
+| **2** ✅ | voice loop: local STT (voxtype) + TTS — Kokoro default, Piper optional (on by default) |
 | **3** ✅ | images: local vision (Repl `/img`, one-shot `--image`), vision_model auto-pick |
 | **4** ✅ | TUI (Textual): full-screen chat, same turn engine; opt-in `.tui` extra |
 | 3 | images (screenshots + files), local vision via Qwen2.5-VL-3B on the RX 7600 |
@@ -169,7 +169,7 @@ and `scripts/ana-quick` reopens a fresh one next time.
 
 **Who sends them:** every frontend that talks to Ana — both `ana tui`
 and the classic REPL (`ana`) push each reply as a `say` event, and voice
-rounds wrap the Piper speak with `state: talk` → `state: idle` (S15b),
+rounds wrap the spoken reply with `state: talk` → `state: idle` (S15b),
 so the waifu reacts the same way no matter where you chat.
 
 ### Keyboard shortcuts (S15)
@@ -222,7 +222,8 @@ config — for labwc (`~/.config/rc.xml`):
 ## Voice (Phase 2)
 
 Bidirectional voice, **fully local** (S9/S10): voxtype for
-speech-to-text, Piper for text-to-speech with a Spanish voice. Nothing is
+speech-to-text, Kokoro (kokoro-onnx) for text-to-speech with a Spanish
+voice — Piper stays available as an alternative TTS backend. Nothing is
 sent to the cloud — recording, transcription, synthesis and playback all
 happen on this machine. Voice is ON by default; `/voice off` (or
 `ana --no-voice`) gives a text-only session.
@@ -245,19 +246,36 @@ Alternative: faster-whisper (`ANA_STT=whisper`, or `--stt whisper`).
   mic used to look like whisper hallucinations (“Gracias por ver el
   video”) instead of an error.
 
+### Text-to-speech backend
+
+Default **Kokoro** (kokoro-onnx, ~82M params): replies are synthesized
+locally with a Spanish voice — no GPU, no system espeak, no root.
+Alternative: Piper (`ANA_TTS=piper`, or `--tts piper`).
+
+- `--tts kokoro|piper` selects per run; `$ANA_TTS` does it per shell.
+- **Spanish voices**: `ef_dora` (female, default), `em_alex` and
+  `em_santa` (male) — pick one with `$ANA_KOKORO_VOICE`, e.g.
+  `export ANA_KOKORO_VOICE=em_alex`.
+- `$ANA_KOKORO_DIR` points at the model directory (default
+  `~/.local/share/kokoro`, see below).
+- If a backend's package or model files are missing, Ana emits
+  `(voice unavailable: …)` when the reply would be spoken and keeps
+  running in text mode — the REPL never crashes on voice errors.
+
 ### Install
 
 ```sh
-.venv/bin/pip install -e '.[voice]'    # adds faster-whisper>=1.0 + piper-tts
+.venv/bin/pip install -e '.[voice]'    # adds faster-whisper>=1.0 + piper-tts + kokoro-onnx>=0.4
 ```
 
-With the default voxtype backend, the `faster-whisper` extra is optional
-(you still need `piper-tts` for replies).
+With the default voxtype backend, the `faster-whisper` extra is optional;
+for replies you need the default TTS backend's package, `kokoro-onnx`
+(or `piper-tts` when `ANA_TTS=piper`).
 
-Version bounds are deliberately permissive: `faster-whisper>=1.0` and
-`piper-tts` unpinned — the packages are not installed in this environment
-yet (install was deferred), so bounds stay loose until a known-good pair
-is verified. The group is **not** installed by default.
+Version bounds are deliberately permissive: `faster-whisper>=1.0`,
+`piper-tts` and `kokoro-onnx>=0.4` unpinned — `kokoro-onnx` 0.4.7 is the
+verified pair on this machine, the others stay loose until a known-good
+pair is pinned. The group is **not** installed by default.
 
 Besides the Python packages you need:
 
@@ -265,9 +283,30 @@ Besides the Python packages you need:
   (the `pw-record` alternative from PipeWire is mentioned in the error)
 - `paplay` for playback (PipeWire/PulseAudio, default on Omarchy);
   `aplay` is used as fallback
-- a Piper **Spanish** voice model (below)
+- the Kokoro **model files** (below) for the default backend — or a
+  Piper **Spanish** voice model if you use `ANA_TTS=piper`
 
-### Spanish voice model
+### Kokoro model files (default backend)
+
+Two files under `$ANA_KOKORO_DIR` (default `~/.local/share/kokoro`):
+`kokoro-v1.0.onnx` and `voices-v1.0.bin`. Download them once from the
+`model-files-v1.0` release assets of
+[thewh1teagle/kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx/releases):
+
+```sh
+mkdir -p ~/.local/share/kokoro
+wget -O ~/.local/share/kokoro/kokoro-v1.0.onnx \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+wget -O ~/.local/share/kokoro/voices-v1.0.bin \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+# or keep them anywhere else:
+export ANA_KOKORO_DIR=/path/to/kokoro-models
+```
+
+The Spanish voices (`ef_dora`, `em_alex`, `em_santa`) ship inside
+`voices-v1.0.bin`; choose one with `ANA_KOKORO_VOICE`.
+
+### Piper voice model (`ANA_TTS=piper`)
 
 Resolution order: `$ANA_PIPER_MODEL`, else the first `es_*.onnx` found
 under `~/.local/share/piper/` (flat file or one folder per voice). If
@@ -298,7 +337,8 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
   terminar (max 12s))`. The first Enter starts recording, the second
   stops it; recording also auto-stops at the max time. The audio is
   transcribed locally and run through the normal tool-enabled turn,
-  then Ana speaks the final reply with Piper. Silence gets
+  then Ana speaks the final reply with the TTS backend (Kokoro by
+  default). Silence gets
   `(no escuché nada)` and returns to the prompt.
 - The max recording time comes from `ANA_VOICE_MAX_SECONDS` (seconds,
   default `12`).
@@ -308,8 +348,8 @@ In the REPL, `/voice on|off|status` toggles voice for the session:
   resume when the recording stops. `ANA_VOICE_PAUSE_MEDIA=0` opts out.
 - **Typed input** still works while voice is on — the reply is spoken
   too. `/voice off` stops the playback and the push-to-talk rounds.
-- If a dependency or device is missing (no `voxtype`, no `piper`,
-  no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
+- If a dependency or device is missing (no `voxtype`, no
+  `kokoro-onnx`, no `arecord`...), Ana emits `(voice unavailable: <reason>)` and keeps
   running in text mode — the REPL never crashes on voice errors.
 
 ### Global voice hotkey — `ana talk` (S15c)
@@ -335,8 +375,8 @@ two-press toggle, not hold-to-talk:
   no-op with “ya estoy respondiendo”, so it can’t corrupt the round.
 
 The transcript runs through the **same turn engine as the REPL**
-(tools, provider config, error rollback, Piper reply and the waifu
-say/talk/idle events) — `talk` is orchestration, not a second code
+(tools, provider config, error rollback, the spoken reply and the
+waifu say/talk/idle events) — `talk` is orchestration, not a second code
 path. Session state lives in `$XDG_RUNTIME_DIR/ana/{talk.json,talk.stop}`
 beside the waifu FIFO and is cleared after every round; a crashed
 worker’s dead pid is detected, so the next press starts fresh.
@@ -346,13 +386,13 @@ start, `(no escuché nada)`, `(voice unavailable: …)` and the first
 120 chars of the reply) plus a `🎙 te escucho…` subtitle on the waifu
 overlay when it’s running. Streamed turn output goes nowhere by
 default (no TTY to write to); set `ANA_TALK_DEBUG=/path/to/log` to
-append it to a file. `--stt` and `--config` work as everywhere else:
-`.venv/bin/ana --stt whisper talk`.
+append it to a file. `--stt`, `--tts` and `--config` work as everywhere
+else: `.venv/bin/ana --stt whisper --tts piper talk`.
 
 ### Privacy
 
 All local, no cloud STT/TTS: mic audio goes straight to faster-whisper
-(CPU, `small` model by default) and replies are synthesized by Piper on
+(CPU, `small` model by default) and replies are synthesized by Kokoro on
 this machine. The recorded WAV is deleted right after transcription.
 
 ## Memory (Engram)
