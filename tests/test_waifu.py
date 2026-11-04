@@ -102,6 +102,38 @@ class TestMonitorChoice:
 # ------------------------------------------------------ fifo events
 
 
+class TestSanitizeForSpeech:
+    """Replies are spoken and subtitled: markdown/symbols must never
+    reach Piper or the overlay label literally ("leer ** en voz alta")."""
+
+    def test_strips_markdown_for_speech(self):
+        from ana.waifu import sanitize_for_speech
+
+        out = sanitize_for_speech(
+            "## Título\n**negrita** y _énfasis_ y `código` y "
+            "[texto](https://x.example) y ~~tachado~~")
+        assert out == "Título negrita y énfasis y código y texto y tachado"
+
+    def test_strips_emojis_and_symbols_keeps_spanish_punctuation(self):
+        from ana.waifu import sanitize_for_speech
+
+        out = sanitize_for_speech("¡Hola! 👋 ¿Qué tal? 🎤✨ 🚀")
+        assert out == "¡Hola! ¿Qué tal?"
+
+    def test_strips_list_markers_and_collapses_whitespace(self):
+        from ana.waifu import sanitize_for_speech
+
+        out = sanitize_for_speech(
+            "- primer punto\n2. segundo punto\n\nparrafo")
+        assert out == "primer punto segundo punto parrafo"
+
+    def test_plain_spanish_text_is_untouched(self):
+        from ana.waifu import sanitize_for_speech
+
+        text = "¡Hola! Soy Ana, tu asistente. ¿En qué te ayudo hoy?"
+        assert sanitize_for_speech(text) == text
+
+
 class TestFifoSend:
     def test_send_overlay_event_writes_json_line(self, tmp_path, monkeypatch):
         import os
@@ -133,6 +165,40 @@ class TestFifoSend:
         waifu_send({"type": "state", "state": "talk"})
         t.join(timeout=2)
         assert lines == ['{"type": "state", "state": "talk"}']
+
+    def test_say_event_reaches_the_overlay_already_sanitized(
+            self, tmp_path, monkeypatch):
+        # the subtitle must never show raw **markdown** or emojis
+        import json
+        import os
+        import threading
+        import time
+
+        from ana.waifu import fifo_path, waifu_send
+
+        monkeypatch.setattr("ana.waifu.fifo_path", lambda: tmp_path / "w.fifo")
+        path = tmp_path / "w.fifo"
+        os.mkfifo(path)
+
+        lines = []
+
+        def reader():
+            with open(path, "r") as fh:
+                for line in fh:
+                    lines.append(line.strip())
+                    break
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        for _ in range(30):
+            time.sleep(0.02)
+            if lines:
+                break
+
+        waifu_send({"type": "say", "text": "**¡Hola!** 👋 ¿cómo estás?"})
+        t.join(timeout=2)
+        payload = json.loads(lines[0])
+        assert payload["text"] == "¡Hola! ¿cómo estás?"
 
     def test_missing_fifo_is_a_silent_noop(self, tmp_path, monkeypatch):
         from ana.waifu import fifo_path, waifu_send

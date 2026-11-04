@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from enum import Enum
 from pathlib import Path
 
@@ -150,6 +151,45 @@ def fade_steps(steps: int = 10) -> list[float]:
     return [round(i / (steps - 1), 4) for i in range(steps)]
 
 
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_EMPHASIS = re.compile(r"(?<![\w*])([*_~]{1,2})([^*_~]+)\1")
+# emoji/symbol blocks: piper/espeak would read them literally or choke
+_SYMBOL_RANGES = (
+    (0x2190, 0x23FF),   # arrows + misc technical (⏱ ⌨)
+    (0x25A0, 0x27BF),   # geometric + misc symbols + dingbats (❤ ✨)
+    (0x2B00, 0x2BFF),   # misc symbols and arrows
+    (0x1F000, 0x1FAFF), # emoji planes
+)
+_SINGLE_SYMBOLS = {0xFE0F, 0x200D, 0x2049, 0x203C, 0x2122, 0x00A9,
+                   0x00AE, 0x20E3, 0x2022}
+
+
+def _is_symbol(ch: str) -> bool:
+    o = ord(ch)
+    return o in _SINGLE_SYMBOLS or any(lo <= o <= hi
+                                       for lo, hi in _SYMBOL_RANGES)
+
+
+def sanitize_for_speech(text: str) -> str:
+    """Plain prose for the TTS voice and the overlay subtitle.
+
+    Replies arrive as markdown with emoji; Piper/espeak would read the
+    markers literally ("asterisco asterisco") and the label would show
+    raw ``**``. Spanish punctuation and accented letters (¡ ¿ á é ü…)
+    are kept untouched.
+    """
+    t = _MD_LINK.sub(r"\1", text)
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+    t = _EMPHASIS.sub(r"\2", t)
+    t = re.sub(r"^#{1,6}\s*", "", t, flags=re.M)
+    t = re.sub(r"^\s*>\s?", "", t, flags=re.M)
+    t = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", t, flags=re.M)
+    t = "".join(ch for ch in t if not _is_symbol(ch))
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def waifu_send(event: dict) -> None:
     """Send one JSON event to the running overlay (if any); never raises.
 
@@ -164,7 +204,13 @@ def waifu_send(event: dict) -> None:
     except OSError:
         return  # nobody listening (overlay not running)
     try:
-        os.write(fd, (json.dumps(event) + "\n").encode())
+        payload = event
+        if event.get("type") == "say" and isinstance(event.get("text"),
+                                                     str):
+            # the subtitle is speech: never show raw markdown/emojis
+            payload = {**event,
+                       "text": sanitize_for_speech(event["text"])}
+        os.write(fd, (json.dumps(payload) + "\n").encode())
     except OSError as exc:
         if exc.errno == errno.ENXIO:
             pass  # reader not ready: the nicety is a nicety
