@@ -440,3 +440,25 @@ class TestImageDownscale:
         joined = " ".join(cmd)
         assert "scale" in joined and "640" in joined
 
+
+
+# --------------------------------------------- memory-correction rule (prompt)
+
+
+class TestSystemPromptMemoryRule:
+    """The injected memory section must tell Ana to persist corrections
+    (same title -> in-place update) in the SAME turn, before replying."""
+
+    RULE = ("Before answering, when the user states, corrects or retracts "
+            "a durable personal fact, call memory_save with the SAME title "
+            "as the existing memory so it updates in place — do it in "
+            "that turn, not later.")
+
+    def test_prompt_includes_the_memory_correction_rule(self, cfg,
+                                                        monkeypatch):
+        from ana.cli import _system_prompt
+        from ana.config import load_config
+        import ana.memory as memory
+        monkeypatch.setattr(memory, "session_context", lambda: "CTX-FAKE")
+        prompt = _system_prompt(load_config(cfg))
+        assert self.RULE in prompt

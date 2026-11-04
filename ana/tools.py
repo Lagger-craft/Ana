@@ -212,7 +212,10 @@ def build_default_tools() -> ToolRegistry:
             "Save a durable fact or preference about the user (name, likes, "
             "dislikes, workflow, recurring context) to Ana's long-term "
             "memory so FUTURE sessions remember it. Do not store transient "
-            "details of the current chat."),
+            "details of the current chat. The title is the key: saving with "
+            "an EXISTING title updates that memory in place — when the user "
+            "corrects or refines a fact, reuse the exact same title and "
+            "never create a second record for the same topic."),
         parameters={
             "type": "object",
             "properties": {

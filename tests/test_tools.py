@@ -191,6 +191,16 @@ class TestMemoryTools:
         assert search["required"] == ["query"]
         assert "query" in search["properties"]
 
+    def test_save_description_titles_are_keys_and_update_in_place(self, tools):
+        """The schema stays the same, but the description must teach the
+        model that an EXISTING title updates that memory in place."""
+        spec = {t["function"]["name"]: t["function"]
+                for t in tools.to_spec("chat")}
+        desc = spec["memory_save"]["description"].lower()
+        assert "existing title" in desc
+        assert "updates that memory in place" in desc
+        assert "never create a second record" in desc
+
     def test_save_posts_through_the_memory_seam(self, tools, monkeypatch):
         import ana.memory as memory
         calls = []
@@ -199,6 +209,7 @@ class TestMemoryTools:
             calls.append((path, body))
             return {"id": 7, "status": "saved"}
 
+        monkeypatch.setattr(memory, "_get", lambda *a, **k: [])  # no match
         monkeypatch.setattr(memory, "_post", fake_post)
         out = tools.call("memory_save", {"title": "coffee",
                                          "content": "likes flat white",
@@ -223,6 +234,8 @@ class TestMemoryTools:
         def down(path, body):
             raise memory.MemoryUnavailable("engram down")
 
+        # resolution succeeds (no match) so the failure is the POST's
+        monkeypatch.setattr(memory, "_get", lambda *a, **k: [])
         monkeypatch.setattr(memory, "_post", down)
         out = tools.call("memory_save", {"title": "t", "content": "c"})
         assert isinstance(out, str)               # a note, never an exception

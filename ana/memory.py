@@ -11,14 +11,18 @@ Graceful degradation is mandatory: every call has a short timeout and
 failures raise MemoryUnavailable — never a raw httpx error — so a slow
 or dead Engram degrades to a one-line note instead of a dead turn.
 
+Upsert semantics: the observation TITLE is the natural key — saving a
+title that already exists updates that record in place (PATCH) instead
+of creating a duplicate, so a correction simply reuses the same title.
+
 Env knobs:
 - ANA_ENGRAM_URL       server base (default http://127.0.0.1:7437)
 - ANA_MEMORY_PROJECT   namespace (default ana-asistente)
 - ANA_MEMORY=0         disables everything (empty context, note-only tools)
 
-Test seam: `_get` / `_post` are the whole transport; tests monkeypatch
-them, and the real implementations refuse to touch the network while a
-pytest test is running (see `_in_pytest`).
+Test seam: `_get` / `_post` / `_patch` are the whole transport; tests
+monkeypatch them, and the real implementations refuse to touch the
+network while a pytest test is running (see `_in_pytest`).
 """
 
 from __future__ import annotations
@@ -102,6 +106,24 @@ def _post(path: str, body: dict) -> Any:
             f"engram POST {path}: {exc.__class__.__name__}: {exc}") from exc
 
 
+def _patch(path: str, body: dict, **params) -> Any:
+    """PATCH seam: decoded JSON, or MemoryUnavailable (never raw httpx).
+
+    Used for in-place updates (`/observations/{id}` requires the
+    `expected_project` query param — 400 without it, 404 unknown id).
+    """
+    if _in_pytest():
+        raise MemoryUnavailable("engram: HTTP disabled during tests")
+    try:
+        resp = httpx.patch(_base_url() + path, params=params, json=body,
+                           timeout=TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        raise MemoryUnavailable(
+            f"engram PATCH {path}: {exc.__class__.__name__}: {exc}") from exc
+
+
 def _ensure_session() -> str:
     """Register this process's Ana session once, before the first write."""
     global _session_id, _session_registered
@@ -121,17 +143,43 @@ def _ensure_session() -> str:
 def save(title: str, content: str, type: str = "fact") -> str:
     """Persist one durable observation; raises MemoryUnavailable on failure.
 
-    Returns a short confirmation suitable as a tool result; with memory
-    disabled (``ANA_MEMORY=0``) a one-line note and no HTTP at all.
+    The title is the NATURAL KEY: when it matches an existing
+    observation (exact after ``strip().casefold()``), the save PATCHes
+    that record in place — a correction reuses the SAME title instead of
+    duplicating the topic — and returns ``actualizado: <title>``; a new
+    title POSTs as before and returns ``guardado: <title>``. When the
+    resolution GET fails the error propagates: never fall back to POST
+    (a duplicate is worse than a failed save). With memory disabled
+    (``ANA_MEMORY=0``) a one-line note and no HTTP at all.
     """
     if not _enabled():
         return "memoria deshabilitada (ANA_MEMORY=0): nada se guardó."
     session_id = _ensure_session()   # registration failure raises first
+    kind = str(type or "fact")
+    key = str(title).strip().casefold()
+    existing = _get("/observations", project=_project(), limit=500)
+    if not isinstance(existing, list):
+        raise MemoryUnavailable(
+            "engram GET /observations: unexpected payload "
+            f"{existing.__class__.__name__} (expected a list)")
+    match = next((obs for obs in existing if isinstance(obs, dict)
+                  and str(obs.get("title", "")).strip().casefold() == key),
+                 None)
+    if match is not None:
+        obs_id = match.get("id")
+        if obs_id is None:
+            raise MemoryUnavailable(
+                "engram: matched observation has no id; refusing to risk "
+                "a duplicate")
+        _patch(f"/observations/{obs_id}",
+               {"content": str(content), "type": kind},
+               expected_project=_project())
+        return f"actualizado: {title}"
     _post("/observations", {
         "session_id": session_id,
         "title": str(title),
         "content": str(content),
-        "type": str(type or "fact"),
+        "type": kind,
         "project": _project(),
         "scope": "project",
     })

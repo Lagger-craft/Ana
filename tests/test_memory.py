@@ -52,12 +52,23 @@ def _fake_get(calls, answer, error=None):
     return get
 
 
+def _fake_patch(calls, error=None):
+    """Recording replacement for the `_patch` transport seam."""
+    def patch(path, body, **params):
+        calls.append((path, body, params))
+        if error is not None:
+            raise error
+        return {"id": 42, "status": "updated"}
+    return patch
+
+
 # ------------------------------------------------------------- save (S1)
 
 
 class TestSave:
     def test_payload_and_session_registered_exactly_once(self, monkeypatch):
         calls = []
+        monkeypatch.setattr(memory, "_get", _fake_get([], []))  # no match
         monkeypatch.setattr(memory, "_post", _fake_post(calls))
         first = memory.save("comida favorita", "prefiere la pizza",
                             type="preference")
@@ -94,10 +105,92 @@ class TestSave:
     def test_project_env_overrides_the_namespace(self, monkeypatch):
         monkeypatch.setenv("ANA_MEMORY_PROJECT", "otro-espacio")
         calls = []
+        monkeypatch.setattr(memory, "_get", _fake_get([], []))  # no match
         monkeypatch.setattr(memory, "_post", _fake_post(calls))
         memory.save("t", "c")
         assert calls[0][1]["project"] == "otro-espacio"
         assert calls[1][1]["project"] == "otro-espacio"
+
+
+# ---------------------------------------------- save: title upsert (natural key)
+
+
+class TestSaveUpsertByTitle:
+    """The title is the natural key: match → PATCH in place, miss → POST."""
+
+    EXISTING = [{"id": 42, "title": "Color favorito", "content": "azul",
+                 "type": "fact"}]
+
+    def test_existing_title_patches_in_place_and_never_posts(self, monkeypatch):
+        get_calls, post_calls, patch_calls = [], [], []
+        monkeypatch.setattr(memory, "_get",
+                            _fake_get(get_calls, self.EXISTING))
+        monkeypatch.setattr(memory, "_post", _fake_post(post_calls))
+        monkeypatch.setattr(memory, "_patch", _fake_patch(patch_calls))
+        out = memory.save("Color favorito", "no es azul: es verde")
+        # resolution first: list the project's observations
+        assert get_calls == [("/observations",
+                              {"project": "ana-asistente", "limit": 500})]
+        # PATCH the matched id with expected_project + new content/type
+        assert patch_calls == [
+            ("/observations/42",
+             {"content": "no es azul: es verde", "type": "fact"},
+             {"expected_project": "ana-asistente"})]
+        # NO observation POST: only the one-time session registration
+        assert [path for path, *_ in post_calls] == ["/sessions"]
+        assert "actualizado" in out and "Color favorito" in out
+
+    def test_new_title_still_posts_a_new_observation(self, monkeypatch):
+        get_calls, post_calls, patch_calls = [], [], []
+        monkeypatch.setattr(memory, "_get", _fake_get(get_calls, []))
+        monkeypatch.setattr(memory, "_post", _fake_post(post_calls))
+        monkeypatch.setattr(memory, "_patch", _fake_patch(patch_calls))
+        out = memory.save("mascota", "tiene un gato llamado Momo")
+        assert get_calls == [("/observations",
+                              {"project": "ana-asistente", "limit": 500})]
+        assert patch_calls == []            # no match → no update
+        assert [path for path, *_ in post_calls] == ["/sessions",
+                                                    "/observations"]
+        assert post_calls[1][1]["title"] == "mascota"
+        assert out == "guardado: mascota"
+
+    def test_match_ignores_case_and_surrounding_whitespace(self, monkeypatch):
+        post_calls, patch_calls = [], []
+        monkeypatch.setattr(memory, "_get", _fake_get([], self.EXISTING))
+        monkeypatch.setattr(memory, "_post", _fake_post(post_calls))
+        monkeypatch.setattr(memory, "_patch", _fake_patch(patch_calls))
+        out = memory.save("  color favorito ", "es verde")
+        assert [path for path, *_ in patch_calls] == ["/observations/42"]
+        assert [path for path, *_ in post_calls] == ["/sessions"]
+        assert "actualizado" in out and "color favorito" in out
+
+    def test_resolution_failure_raises_and_never_falls_back_to_post(
+            self, monkeypatch):
+        """A duplicate is worse than a failed save: no GET → no POST."""
+        post_calls, patch_calls = [], []
+        monkeypatch.setattr(memory, "_get", _fake_get(
+            [], None, error=memory.MemoryUnavailable("engram down")))
+        monkeypatch.setattr(memory, "_post", _fake_post(post_calls))
+        monkeypatch.setattr(memory, "_patch", _fake_patch(patch_calls))
+        with pytest.raises(memory.MemoryUnavailable):
+            memory.save("t", "c")
+        assert [path for path, *_ in post_calls] == ["/sessions"]
+        assert patch_calls == []            # never PATCH, never POST obs
+
+    def test_malformed_resolution_payload_raises_without_posting(
+            self, monkeypatch):
+        """A 200 that is not a list is also never-a-blind-POST.
+
+        Post-GREEN pin of a variant of the same never-fallback rule
+        (whose error path was RED-proven above)."""
+        post_calls, patch_calls = [], []
+        monkeypatch.setattr(memory, "_get", _fake_get([], {"oops": True}))
+        monkeypatch.setattr(memory, "_post", _fake_post(post_calls))
+        monkeypatch.setattr(memory, "_patch", _fake_patch(patch_calls))
+        with pytest.raises(memory.MemoryUnavailable):
+            memory.save("t", "c")
+        assert [path for path, *_ in post_calls] == ["/sessions"]
+        assert patch_calls == []
 
 
 # ---------------------------------------------------------- shutdown (S1)
@@ -106,6 +199,7 @@ class TestSave:
 class TestShutdown:
     def test_shutdown_ends_the_session_once_best_effort(self, monkeypatch):
         calls = []
+        monkeypatch.setattr(memory, "_get", _fake_get([], []))  # no match
         monkeypatch.setattr(memory, "_post", _fake_post(calls))
         memory.save("t", "c")
         session_id = calls[0][1]["id"]
@@ -215,6 +309,8 @@ class TestTransport:
     def test_post_httpx_errors_become_memoryunavailable(self, monkeypatch):
         import httpx as httpx_mod
         monkeypatch.setattr(memory, "_in_pytest", lambda: False)
+        # resolution succeeds (no match) so the flow reaches the real POST
+        monkeypatch.setattr(memory, "_get", lambda *a, **k: [])
 
         def boom(*a, **k):
             raise httpx_mod.ConnectError("connection refused")
@@ -237,12 +333,29 @@ class TestTransport:
             memory.search("q")
         assert "ConnectTimeout" in str(excinfo.value)
 
+    def test_patch_httpx_errors_become_memoryunavailable(self, monkeypatch):
+        import httpx as httpx_mod
+        monkeypatch.setattr(memory, "_in_pytest", lambda: False)
+
+        def boom(*a, **k):
+            raise httpx_mod.ConnectError("connection refused")
+
+        monkeypatch.setattr(memory.httpx, "patch", boom)
+        with pytest.raises(memory.MemoryUnavailable) as excinfo:
+            memory._patch("/observations/1", {"content": "x"},
+                          expected_project="ana-asistente")
+        assert not isinstance(excinfo.value, httpx_mod.HTTPError)
+        assert "ConnectError" in str(excinfo.value)
+
     def test_transport_refuses_the_network_under_pytest(self):
         """No test may ever reach the live server: the guard fires first."""
         with pytest.raises(memory.MemoryUnavailable):
             memory._get("/context", project="ana-asistente")
         with pytest.raises(memory.MemoryUnavailable):
             memory._post("/observations", {"title": "x"})
+        with pytest.raises(memory.MemoryUnavailable):
+            memory._patch("/observations/1", {"content": "x"},
+                          expected_project="ana-asistente")
 
 
 # --------------------------------------------- system prompt injection (S3)
@@ -265,15 +378,18 @@ class _FakeClient:
 class TestSystemPromptInjection:
     def test_repl_prepends_context_to_the_system_prompt(self, cfg,
                                                         monkeypatch):
-        from ana.cli import run_repl
+        from ana.cli import MEMORY_CORRECTION_RULE, run_repl
         monkeypatch.setattr(memory, "session_context", lambda: "CTX-FAKE")
         client = _FakeClient()
         run_repl(cfg_path=cfg, lines=["hola"], tools=False, client_fx=client)
         base = load_config(cfg).system_prompt
-        assert client.calls[0]["system"] == f"CTX-FAKE\n\n{base}"
+        # the context block now carries the correction rule (its wording
+        # is pinned by tests/test_cli.py::TestSystemPromptMemoryRule)
+        assert client.calls[0]["system"] == (
+            f"CTX-FAKE\n\n{MEMORY_CORRECTION_RULE}\n\n{base}")
 
     def test_one_shot_prepends_context(self, cfg, monkeypatch, capsys):
-        from ana.cli import main
+        from ana.cli import MEMORY_CORRECTION_RULE, main
         monkeypatch.setattr(memory, "session_context", lambda: "CTX-FAKE")
         seen = {}
 
@@ -286,7 +402,7 @@ class TestSystemPromptInjection:
         monkeypatch.setattr("ana.cli.build_stream", fake_build)
         assert main(["--config", str(cfg), "-m", "hola", "--no-tools"]) == 0
         base = load_config(cfg).system_prompt
-        assert seen["system"] == f"CTX-FAKE\n\n{base}"
+        assert seen["system"] == f"CTX-FAKE\n\n{MEMORY_CORRECTION_RULE}\n\n{base}"
 
     def test_memory_off_keeps_the_prompt_untouched(self, cfg, monkeypatch):
         from ana.cli import run_repl

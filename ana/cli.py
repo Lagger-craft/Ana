@@ -369,20 +369,34 @@ class _DefaultVoice:
         build_tts(self._tts_backend).speak(text)
 
 
+# Rides with the injected Engram context: a durable-fact correction must
+# be persisted (same title → in-place update, no duplicate record) in the
+# SAME turn, before Ana replies.
+MEMORY_CORRECTION_RULE = (
+    "Before answering, when the user states, corrects or retracts a "
+    "durable personal fact, call memory_save with the SAME title as the "
+    "existing memory so it updates in place — do it in that turn, not "
+    "later.")
+
+
 def _system_prompt(cfg: Config) -> str | None:
     """Config prompt with Ana's memory context prepended (session start).
 
     ``session_context()`` is fetched at most once per process and is
     ``""`` when memory is disabled or Engram is down, so the prompt
-    stays byte-identical to ``cfg.system_prompt`` in those cases.
+    stays byte-identical to ``cfg.system_prompt`` in those cases. When a
+    context IS injected, the block also carries
+    ``MEMORY_CORRECTION_RULE`` so Ana persists user corrections in the
+    same turn instead of answering from stale memory.
     """
     base = cfg.system_prompt or None
     ctx = memory.session_context()
     if not ctx:
         return base
+    block = f"{ctx.strip()}\n\n{MEMORY_CORRECTION_RULE}"
     if base:
-        return f"{ctx.strip()}\n\n{base}"
-    return ctx
+        return f"{block}\n\n{base}"
+    return block
 
 
 def _do_turn(cfg, provider, models, model, history, line, emit,
