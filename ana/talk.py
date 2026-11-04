@@ -1,11 +1,16 @@
 """Headless voice hotkey round (S15c / T35): the `ana talk` subcommand.
 
 One keybinding press = one full voice round with NO window and NO
-terminal focus, so a Hyprland binding can trigger it:
+terminal focus, so a global binding can trigger it — on KDE Plasma
+(System Settings → Shortcuts → command "Ana — Hablar"):
+
+    Exec=/path/to/Ana/scripts/ana-talk-hotkey
+
+or on Hyprland:
 
     bind = SUPER ALT, A, exec, /path/to/.venv/bin/ana talk
 
-Hyprland keybindings fire on key press only (no release), so this is a
+Global bindings fire on key press only (no release), so this is a
 two-press toggle, not hold-to-talk. Session state lives beside the
 waifu FIFO under $XDG_RUNTIME_DIR/ana/:
 
@@ -23,9 +28,11 @@ is treated as absent and a fresh round starts. The worker clears both
 files in a ``finally`` on every exit path.
 
 The transcript runs through the EXISTING turn engine — ``run_repl``
-with ``lines=[transcript, "/exit"]`` and ``voice=True`` — so tools,
-provider config, error rollback, TTS (Kokoro by default) and the waifu
-say/talk/idle events (T34) all come for free; this module is
+with ``lines=[transcript, "/exit"]``, ``voice=True`` and
+``close_overlay=False`` (the overlay stays up across hotkey rounds —
+Option B's closing ``quit`` only applies to the chat frontends) — so
+tools, provider config, error rollback, TTS (Kokoro by default) and
+the waifu say/talk/idle events (T34) all come for free; this module is
 orchestration only.
 
 Headless feedback: a tiny ``notify()`` via ``notify-send`` (all
@@ -248,7 +255,8 @@ def run_talk(cfg_path, stt: str | None = None, tts: str | None = None,
         # the spoken reply and the waifu say/talk/idle events all ride
         # run_repl (T34) — talk.py never forks its own turn path.
         history = run_repl(cfg_path, lines=[heard, "/exit"], voice=True,
-                           voice_fx=vfx, emit=emit_fn)
+                           voice_fx=vfx, emit=emit_fn,
+                           close_overlay=False)
         if history and history[-1].get("role") == "assistant":
             notify_fn("Ana", str(history[-1].get("content", ""))[:120])
         return 0

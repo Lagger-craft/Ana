@@ -76,6 +76,7 @@ def run_repl(
     stt: str | None = None,
     tts: str | None = None,
     images: list[str] | None = None,
+    close_overlay: bool = True,
 ) -> list[dict[str, str]]:
     """Run the interactive chat loop.
 
@@ -93,6 +94,11 @@ def run_repl(
     (tests use fakes; the default is the live :class:`_DefaultVoice`
     backend). Voice errors degrade to ``(voice unavailable: ...)``
     without leaving the REPL.
+
+    ``close_overlay`` guards only the final Option-B ``quit`` event:
+    True (default) closes the overlay when the chat ends; headless
+    ``ana talk`` rounds pass False so the overlay stays up across
+    hotkey rounds.
     """
     cfg = load_config(cfg_path)
     emit = emit or (lambda text: print(text, flush=True))
@@ -294,8 +300,12 @@ def run_repl(
 
     # Option B (user choice): the chat owns the overlay — closing the
     # chat closes it; ana-quick reopens a fresh one on the next session.
+    # Headless `ana talk` rounds pass close_overlay=False: they have no
+    # chat window to close, and the hotkey wrapper keeps (or reopens)
+    # the overlay across rounds.
     from .waifu import waifu_send
-    waifu_send({"type": "quit"})
+    if close_overlay:
+        waifu_send({"type": "quit"})
     memory.shutdown()  # best-effort: end Ana's Engram session at exit
     return history
 

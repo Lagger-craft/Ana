@@ -277,6 +277,18 @@ class TestOrchestration:
         assert not talk_state_path().exists()
         assert not talk_stop_path().exists()
 
+    def test_round_keeps_the_overlay_open(self, cfg, monkeypatch, notifies):
+        # `ana talk` has no chat window to close (Option B does not
+        # apply): the hotkey wrapper keeps the overlay up across rounds,
+        # so the round must not end by sending the overlay quit event.
+        voice = FakeTalkVoice(transcript="hola")
+        seen = {}
+        monkeypatch.setattr(talk_mod, "run_repl", _fake_repl(seen))
+
+        assert _run(cfg, voice, notifies) == 0
+
+        assert seen["close_overlay"] is False
+
     def test_record_voice_error_notifies_and_cleans_up(self, cfg, monkeypatch,
                                                        notifies):
         voice = FakeTalkVoice(record_error=VoiceError("arecord missing"))

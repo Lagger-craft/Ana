@@ -106,6 +106,28 @@ class TestRepl:
         assert [m["content"] for m in history] == ["a", "r", "b", "r"]
 
 
+class TestCloseOverlay:
+    """Option B (default): closing the chat closes the overlay.
+
+    Headless `ana talk` rounds pass close_overlay=False — they have no
+    chat window, and the hotkey wrapper keeps the overlay up across
+    rounds. The DEFAULT quit event stays pinned by
+    tests/test_waifu.py::TestReplWaifuEvents.
+    """
+
+    def test_close_overlay_false_keeps_the_overlay_open(self, cfg,
+                                                         monkeypatch):
+        sent = []
+        # run_repl imports waifu_send from ana.waifu at call time, so
+        # that module is the patchable seam.
+        monkeypatch.setattr("ana.waifu.waifu_send", sent.append)
+
+        run_repl(cfg_path=cfg, lines=["/exit"], stream=None,
+                 close_overlay=False)
+
+        assert {"type": "quit"} not in sent
+
+
 class TestMain:
     def test_one_shot_prints_stream_and_exits_zero(
             self, cfg, monkeypatch, capsys):
