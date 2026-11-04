@@ -136,12 +136,13 @@ class ChatInput(Input if _TEXTUAL_INSTALLED else object):
 
 
 def run_tui(cfg_path, model_override=None, provider_override=None,
-            tools=True, images=None, voice=True):
+            tools=True, images=None, voice=True,
+            stt: str | None = None, tts: str | None = None):
     """Entry point for `ana tui` / `ana --tui`."""
     import_textual()
     AnaApp(cfg_path, model_override=model_override,
            provider_override=provider_override, tools=tools,
-           voice=voice, images=images).run()
+           voice=voice, images=images, stt=stt, tts=tts).run()
     # Option B (user choice): closing the chat closes the overlay;
     # ana-quick reopens a fresh one on the next session.
     from .waifu import waifu_send

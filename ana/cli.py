@@ -695,6 +695,8 @@ def main(argv: list[str] | None = None) -> int:
                 provider_override=args.provider,
                 tools=not args.no_tools,
                 voice=args.voice,
+                stt=args.stt,
+                tts=args.tts,
                 images=args.image or [],
             )
             return 0

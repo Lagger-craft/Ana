@@ -290,6 +290,24 @@ class TestVoiceDefaultOn:
         tui_mod.run_tui(str(cfg))
         assert seen["voice"] is True
 
+    def test_tui_forwards_stt_and_tts_backends(self, cfg, monkeypatch):
+        """--stt/--tts reach the TUI like they reach the REPL and talk."""
+        import ana.tui as tui_mod
+        seen = {}
+
+        class FakeApp:
+            def __init__(self, *args, **kw):
+                seen.update(kw)
+
+            def run(self):
+                return None
+
+        monkeypatch.setattr(tui_mod, "AnaApp", FakeApp)
+        assert main(["--config", str(cfg), "--tui",
+                     "--stt", "whisper", "--tts", "piper"]) == 0
+        assert seen["stt"] == "whisper"
+        assert seen["tts"] == "piper"
+
 
 class TestVisionModel:
     def test_pick_model_returns_vision_model_when_images_present(self):
